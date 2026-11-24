@@ -6,7 +6,7 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
 
 | Part | State |
 |---|---|
-| Repo skeleton, `uv` workspace, CI matrix (Ubuntu + Windows) | built; CI has not run yet (first push) |
+| Repo skeleton, `uv` workspace, CI matrix (Ubuntu + Windows) | built; the 32 tests pass on both |
 | Projects: create, rename, duplicate, archive, delete, export, import | built and tested |
 | Activity log ("what happened and why"), Arabic + English | built and tested |
 | Sources: IP/NVR (RTSP, HTTP), USB, video file; keyring for passwords | built; **tested with video files only** |
@@ -20,8 +20,8 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
 
 - **No real camera has been connected.** RTSP and USB paths go through OpenCV and are untested on
   hardware, on either OS. First thing to try on the owner's machine.
-- **Windows is untested** until CI runs. The code avoids known traps (posix paths in archives,
-  closed SQLite handles, non-ASCII picture paths), but only CI will confirm.
+- **Windows:** the automated tests pass on Windows in CI, but nobody has opened the UI or
+  connected a camera on a real Windows PC yet.
 - ONVIF discovery is not built; the camera address is typed in.
 - USB cameras are listed by index, not by name.
 - Recording runs inside the HTTP request (max 1 hour) and blocks it. The job queue with progress,

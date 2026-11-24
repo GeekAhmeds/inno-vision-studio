@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+.env
+# media, datasets and weights never go into git; they live in the workspace
+*.mp4
+*.avi
+*.mkv
+*.onnx
+*.pt

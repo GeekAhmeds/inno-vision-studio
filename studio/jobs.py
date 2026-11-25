@@ -1,8 +1,9 @@
 """Background jobs with progress and cancel (prompt §4).
 
 Long steps (sampling 25 h of video, pre-labelling thousands of frames) must not block the page and
-must survive a page refresh. Jobs run one at a time in a single worker thread: the GPU has 8 GB and
-two heavy models at once would not fit. Each job is written to `<project>/jobs/<id>.json`, so the
+must survive a page refresh. Jobs run one at a time per lane: the "compute" lane holds everything
+that uses the GPU or the CPU heavily (8 GB of GPU cannot hold two models); the "capture" lane holds
+camera recordings, which must start on time and never wait behind a long computation. Each job is written to `<project>/jobs/<id>.json`, so the
 history survives a restart; a job that was running when the studio stopped shows as interrupted.
 """
 
@@ -72,12 +73,12 @@ class Context:
 
 class JobManager:
     def __init__(self) -> None:
-        self._queue: queue.Queue[tuple[Job, Callable[[Context], Any], Context]] = queue.Queue()
+        self._queues: dict[str, queue.Queue[tuple[Job, Callable[[Context], Any], Context]]] = {}
+        self._workers: dict[str, threading.Thread | None] = {}
         self._contexts: dict[str, Context] = {}
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._save_lock = threading.Lock()
-        self._worker: threading.Thread | None = None
 
     def _dir(self, slug: str) -> Path:
         d = project_dir(slug) / "jobs"
@@ -94,27 +95,31 @@ class JobManager:
             except Exception:  # the project was deleted while the job ran: nothing to record
                 return
 
-    def submit(self, slug: str, kind: str, title_ar: str, fn: Callable[[Context], Any]) -> Job:
+    def submit(self, slug: str, kind: str, title_ar: str, fn: Callable[[Context], Any], lane: str = "compute") -> Job:
         job = Job(uuid.uuid4().hex[:12], slug, kind, title_ar)
         ctx = Context(job, self)
         with self._lock:
             self._jobs[job.id] = job
             self._contexts[job.id] = ctx
             self._save(job)
-            self._queue.put((job, fn, ctx))
-            if self._worker is None or not self._worker.is_alive():
-                self._worker = threading.Thread(target=self._run, daemon=True, name="studio-jobs")
-                self._worker.start()
+            q = self._queues.setdefault(lane, queue.Queue())
+            q.put((job, fn, ctx))
+            worker = self._workers.get(lane)
+            if worker is None or not worker.is_alive():
+                worker = threading.Thread(target=self._run, args=(lane,), daemon=True, name=f"studio-jobs-{lane}")
+                self._workers[lane] = worker
+                worker.start()
         return job
 
-    def _run(self) -> None:
+    def _run(self, lane: str) -> None:
+        q = self._queues[lane]
         while True:
             try:
-                job, fn, ctx = self._queue.get(timeout=5)
+                job, fn, ctx = q.get(timeout=5)
             except queue.Empty:
                 with self._lock:
-                    if self._queue.empty():
-                        self._worker = None
+                    if q.empty():
+                        self._workers[lane] = None
                         return
                 continue
             if ctx.cancelled():

@@ -85,7 +85,9 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
 - **Windows:** the automated tests pass on Windows in CI, but nobody has opened the UI on a real
   Windows PC. The browser copy of truth clips needs VP8 in OpenCV's FFmpeg; if it is missing, the
   counting page falls back to single frames.
-- Recording a clip still runs inside the HTTP request (the harness, sampling and pre-labelling are jobs).
+- Recording now runs as a job in its own lane ("capture"), reconnects when the stream drops, can be
+  stopped keeping what it has, and files each camera under its own angle id (`<source>-<W>x<H>`), so a
+  recording is never deleted because of an angle clash (found on the owner's Hikvision, 2026-11-25).
 - ONVIF discovery, USB camera names, scheduled recording, disk-space guard.
 - Timeline building, gap detection, burned-in-clock OCR (module 1).
 - The UI is plain JS. The Vue/Nuxt build named in the specification can replace it later.

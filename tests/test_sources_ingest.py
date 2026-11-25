@@ -161,3 +161,26 @@ def test_every_step_leaves_an_explained_log_entry(slug, video, product_root):
         assert entry["ar"] and entry["en"] and entry["user"] == "tester" and entry["ts"]
     video_entry = next(e for e in entries if e["step"] == "ingest.video")
     assert video_entry["numbers"]["frames"] == 30 and video_entry["why_ar"]
+
+
+def test_a_recording_is_never_lost_to_an_angle_clash(slug, video, tmp_path):
+    """The owner's case: an earlier 320×240 video holds angle-1; a camera then records at another
+    resolution. The recording must be kept, under the camera's own angle."""
+    ingest.add_video(slug, video, angle_id="angle-1")
+    big = write_video(tmp_path / "cam.mp4", frames=40, size=(640, 360))
+    src = sources.add_source(slug, "video", "Camera stand-in", path=str(big))
+    media = sources.record_and_register(slug, src["id"], seconds=1.0)
+    assert media["width"] == 640 and media["angle_id"] == f"{src['id'][4:]}-640x360"
+    # even when the owner names the clashing angle, the clip is kept under the camera's angle
+    again = sources.add_source(slug, "video", "Camera 2", path=str(write_video(tmp_path / "c2.mp4", frames=30, size=(640, 360))))
+    kept = sources.record_and_register(slug, again["id"], seconds=0.5, angle_id="angle-1")
+    assert kept["angle_id"].endswith("-640x360")
+
+
+def test_recording_can_be_stopped_and_keeps_what_it_has(slug, tmp_path):
+    long = write_video(tmp_path / "long.mp4", frames=200, size=(320, 240))
+    src = sources.add_source(slug, "video", "Long", path=str(long))
+    seen = []
+    media = sources.record_and_register(slug, src["id"], seconds=60, progress=lambda f, m: seen.append(f),
+                                        should_stop=lambda: len(seen) >= 3)
+    assert 3 <= media["duration_s"] <= 5 and seen == sorted(seen)

@@ -85,7 +85,10 @@ def test_source_test_and_activity_over_http(client, tmp_path):
     src = client.post("/api/projects/bread/sources", json={"kind": "video", "name": "Clip", "path": str(clip)}).json()
     tested = client.post(f"/api/projects/bread/sources/{src['id']}/test").json()
     assert tested["ok"] and client.get(f"/api/projects/bread/file/{tested['preview']}").status_code == 200
-    recorded = client.post(f"/api/projects/bread/sources/{src['id']}/record", json={"seconds": 1})
-    assert recorded.status_code == 200 and recorded.json()["rel_path"].startswith("media/videos/rec_")
+    job = client.post(f"/api/projects/bread/sources/{src['id']}/record", json={"seconds": 1}).json()
+    from studio import jobs
+    done = jobs.manager.wait(job["id"], 60)
+    assert done.state == "done", done.error
+    assert done.result["width"] == 320 and done.result["frames"] >= 15
     steps = [e["step"] for e in client.get("/api/projects/bread/activity").json()]
     assert steps[:3] == ["ingest.video", "source.record", "source.test"]

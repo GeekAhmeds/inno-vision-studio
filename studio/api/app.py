@@ -173,15 +173,25 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{slug}/sources/{source_id}/record")
     def source_record(slug: str, source_id: str, body: dict = Body(...)) -> dict[str, Any]:
         seconds = float(body.get("seconds", 60))
-        if not 1 <= seconds <= 3600:
-            raise HTTPException(400, "Recording length must be between 1 second and 1 hour.")
-        clip = sources.record(slug, source_id, seconds)
-        try:
-            return ingest.add_video(slug, clip, angle_id=body.get("angle_id") or "angle-1", source_id=source_id)
-        except ingest.IngestError:
-            clip.unlink(missing_ok=True)
-            clip.with_suffix(".timestamps.json").unlink(missing_ok=True)
-            raise
+        if not 1 <= seconds <= 4 * 3600:
+            raise HTTPException(400, "Recording length must be between 1 second and 4 hours.")
+        source = sources.get_source(slug, source_id)
+        angle = body.get("angle_id") or None
+
+        def work(ctx: jobs.Context) -> dict[str, Any]:
+            def progress(fraction: float, message: str) -> None:
+                try:
+                    ctx.progress(fraction, message)
+                except jobs.Cancelled:
+                    pass   # "cancel" stops the recording; what was recorded is kept and registered
+
+            media = sources.record_and_register(slug, source_id, seconds, angle,
+                                                progress=progress, should_stop=ctx.cancelled)
+            return {"media_id": media["id"], "width": media["width"], "height": media["height"],
+                    "frames": media["frames"], "duration_s": media["duration_s"], "angle_id": media.get("angle_id")}
+
+        return jobs.manager.submit(slug, "record", f"تسجيل {int(seconds)} ث من «{source['name']}»", work,
+                                   lane="capture").to_dict()
 
     # ------------------------------------------------------------ media
 

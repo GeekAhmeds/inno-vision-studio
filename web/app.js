@@ -170,7 +170,8 @@ async function sourcesTab(slug, p, body, reload) {
     h("div", { class: "card" }, h("h2", {}, "إضافة مصدر"),
       h("div", { class: "row" }, field("النوع", kind), field("الاسم", name)), net, usb, file,
       h("div", { class: "row" }, h("button", { class: "primary", onclick: add }, "إضافة"))),
-    p.sources.length ? p.sources.map((s) => sourceCard(slug, s, reload)) : h("p", { class: "muted" }, "لا توجد مصادر بعد."));
+    p.sources.length ? p.sources.map((s) => sourceCard(slug, s, reload)) : h("p", { class: "muted" }, "لا توجد مصادر بعد."),
+    jobsCard(slug, ["record"]));
 }
 
 function sourceCard(slug, s, reload) {
@@ -198,15 +199,22 @@ function sourceCard(slug, s, reload) {
       }) }, "اختبار الاتصال"),
       h("label", { style: "flex:0 0 auto" }, "مدة التسجيل (ث)", seconds),
       h("button", { onclick: act(async () => {
-        mount(out, "جارٍ التسجيل… لا تغلق الصفحة.");
-        const m = await api(`/projects/${slug}/sources/${s.id}/record`, { method: "POST", json: { seconds: Number(seconds.value) } });
-        mount(out, h("div", { class: "ok" }, `سُجّل مقطع ${m.width}×${m.height}، ${m.frames} صورة. تجده في تبويب البيانات.`));
+        await api(`/projects/${slug}/sources/${s.id}/record`, { method: "POST", json: { seconds: Number(seconds.value) } });
+        mount(out, h("div", { class: "muted" }, "بدأ التسجيل في الخلفية. تابعه في «المهام» أسفل الصفحة؛ تقدر تتنقل في البرنامج وترجع."));
+        document.dispatchEvent(new Event("jobs-refresh"));
       }) }, "تسجيل مقطع"),
       ["ip", "nvr"].includes(s.kind) ? h("button", { onclick: () => { login.hidden = !login.hidden; } }, "تعديل الدخول") : null,
       (s.params.url || "").startsWith("rtsp://") ? h("button", { onclick: act(async () => {
         mount(out, "جارٍ تجربة المسارات المعروفة… (حتى دقيقة)");
         const r = await api(`/projects/${slug}/sources/${s.id}/find-path`, { method: "POST" });
-        mount(out, r.found.length
+        mount(out, r.accepts_any
+          ? h("div", {}, h("p", {}, `الكاميرا تقبل أي مسار (${r.found.length} من ${r.tried})، فالبحث لا يحدد شيئًا. استخدم المسار القياسي لماركتها، مثلًا Hikvision:`),
+              [["البث الرئيسي", "/Streaming/Channels/101"], ["البث الفرعي", "/Streaming/Channels/102"]].map(([name, path]) => h("div", { class: "row", style: "align-items:center;margin:4px 0" },
+                h("span", { style: "flex:1" }, name, " — ", h("code", { dir: "ltr" }, path)),
+                h("button", { class: "primary", onclick: act(async () => {
+                  await api(`/projects/${slug}/sources/${s.id}/use-path`, { method: "POST", json: { url_path: path } }); toast("حُفظ المسار. اضغط «اختبار الاتصال»."); reload();
+                }) }, "استخدم"))))
+          : r.found.length
           ? h("div", {}, h("p", {}, `جُرّب ${r.tried} مسار، ويعمل منها:`), r.found.map((f) => h("div", { class: "row", style: "align-items:center;margin:4px 0" },
               h("span", { style: "flex:1" }, f.maker, " — ", h("code", { dir: "ltr" }, f.path)),
               h("button", { class: "primary", onclick: act(async () => {
@@ -336,7 +344,7 @@ async function countingTab(slug, p, body, reload) {
     mount(body, explain("أضف فيديو أولًا (تبويب البيانات). أول فيديو لكل زاوية كاميرا يحفظ صورة مرجعية نرسم عليها خط العدّ."));
     return;
   }
-  const angle = data.angles.find((a) => a.angle_id === cfg.angle_id) || data.angles[0];
+  let angle = data.angles.find((a) => a.angle_id === cfg.angle_id) || data.angles[0];
   const img = h("img", { src: `/api/projects/${slug}/file/${angle.reference}`, style: "width:100%;display:block;border-radius:8px" });
   const layer = svg("svg", { style: "position:absolute;inset:0;width:100%;height:100%;pointer-events:none" });
   const direction = h("select", {}, h("option", { value: "positive" }, "في اتجاه السهم فقط"), h("option", { value: "both" }, "في الاتجاهين"));
@@ -358,7 +366,11 @@ async function countingTab(slug, p, body, reload) {
       "إذا كان السهم عكس حركة السير اضغط «اعكس الاتجاه»."),
     h("div", { class: "card" },
       h("div", { class: "row" },
-        field("زاوية الكاميرا", h("select", { disabled: data.angles.length < 2 }, data.angles.map((a) => h("option", { value: a.angle_id }, `${a.angle_id} (${a.width}×${a.height})`)))),
+        field("زاوية الكاميرا", h("select", { disabled: data.angles.length < 2, onchange: (ev) => {
+          angle = data.angles.find((a) => a.angle_id === ev.target.value);
+          if (angle.angle_id !== cfg.angle_id) line = null;
+          img.src = `/api/projects/${slug}/file/${angle.reference}`;
+        } }, data.angles.map((a) => h("option", { value: a.angle_id, selected: a.angle_id === angle.angle_id }, `${a.angle_id} (${a.width}×${a.height})`)))),
         field("العدّ", direction), field("هامش بعد الخط (بكسل)", hyst),
         h("button", { onclick: () => { if (line) { line = [line[2], line[3], line[0], line[1]]; redraw(); } } }, "اعكس الاتجاه"),
         h("button", { class: "primary", onclick: act(async () => {
@@ -595,6 +607,7 @@ function jobResult(slug, j) {
   if (j.kind === "harness") return harnessResult(slug, j.result);
   if (j.kind === "bakeoff") return bakeoffResult(j.result);
   if (j.kind === "sample") return h("div", { class: "muted" }, `فُحصت ${j.result.scanned} لقطة، واختيرت ${j.result.diverse} متنوعة و${j.result.low_motion} هادئة.`);
+  if (j.kind === "record") return h("div", { class: "ok" }, `سُجّل ${(j.result.duration_s || 0).toFixed(0)} ث بدقة ${j.result.width}×${j.result.height} (${j.result.frames} صورة)، زاوية «${j.result.angle_id}». تجده في تبويب البيانات.`);
   if (j.kind === "prelabel") return h("div", { class: "muted" }, `${j.result.boxes} صندوق على ${j.result.images} صورة (${j.result.ms_per_image} ms للصورة، ${j.result.provider}).`);
   return null;
 }
@@ -617,13 +630,14 @@ function jobsCard(slug, kinds, onDone) {
     mount(box, h("h2", {}, "المهام"), all.length ? all.slice(0, 8).map((j) => h("div", { style: "padding:8px 0;border-bottom:1px solid var(--line)" },
       h("div", { class: "row", style: "align-items:center" },
         h("b", { style: "flex:1" }, j.title_ar), h("span", { class: j.state === "failed" ? "bad" : j.state === "done" ? "ok" : "muted" }, JOB_STATE[j.state] || j.state),
-        ["queued", "running"].includes(j.state) ? h("button", { onclick: act(async () => { await api(`/projects/${slug}/jobs/${j.id}/cancel`, { method: "POST" }); tick(); }) }, "إلغاء") : null),
+        ["queued", "running"].includes(j.state) ? h("button", { onclick: act(async () => { await api(`/projects/${slug}/jobs/${j.id}/cancel`, { method: "POST" }); tick(); }) }, j.kind === "record" ? "أوقف واحفظ ما سُجّل" : "إلغاء") : null),
       ["queued", "running"].includes(j.state) ? h("div", {}, h("progress", { value: j.progress, max: 1, style: "width:100%" }), h("span", { class: "muted" }, j.message_ar)) : null,
       jobResult(slug, j))) : h("p", { class: "muted" }, "لا توجد مهام بعد."));
     if (active && !timer) timer = setInterval(box.refresh, 1500);
     if (!active && timer) { clearInterval(timer); timer = null; }
   };
   box.refresh = () => tick().catch((e) => toast(e.message, true));
+  document.addEventListener("jobs-refresh", () => { if (document.body.contains(box)) box.refresh(); });
   setTimeout(box.refresh, 0);
   return box;
 }

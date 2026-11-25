@@ -12,7 +12,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import os
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
@@ -216,10 +216,20 @@ def test_connection(slug: str, source_id: str, frames: int = 20) -> dict[str, An
     return result
 
 
-def record(slug: str, source_id: str, seconds: float, max_frames: int | None = None) -> Path:
+def default_angle(source: dict[str, Any], width: int, height: int) -> str:
+    """Each camera gets its own angle id, with its resolution, so a recording never collides with
+    an angle that came from another camera or another stream (main vs sub)."""
+    return f"{source['id'].removeprefix('src-')}-{width}x{height}"
+
+
+def record(slug: str, source_id: str, seconds: float, max_frames: int | None = None,
+           progress: Callable[[float, str], None] | None = None, should_stop: Callable[[], bool] | None = None,
+           max_reconnects: int = 5) -> Path:
     """Record a clip from a source into the project (live cameras are recorded first, so every
     result can be replayed). Writes the clip plus a sidecar with one timestamp per frame.
 
+    A live stream that drops is reopened (up to `max_reconnects` times) and the recording goes on;
+    the gap is visible in the timestamps and counted. Stopping early keeps what was recorded.
     The clip is NOT registered as media here; pass the returned path to `ingest.add_video`.
     """
     source = get_source(slug, source_id)
@@ -231,38 +241,81 @@ def record(slug: str, source_id: str, seconds: float, max_frames: int | None = N
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_path = folder / "media" / "videos" / f"rec_{source_id}_{stamp}.mp4"
     live = source["kind"] != "video"
-    writer, stamps = None, []
+    writer, stamps, reconnects, size = None, [], 0, None
     started = time.monotonic()
+    last_report = 0.0
     try:
         while True:
+            if should_stop and should_stop():
+                break
             ok, frame = cap.read()
             if not ok or frame is None:
-                break
+                if not live or reconnects >= max_reconnects or time.monotonic() - started >= seconds:
+                    break
+                cap.release()
+                reconnects += 1
+                if progress:
+                    progress(min((time.monotonic() - started) / seconds, 0.99), f"انقطع البث، إعادة الاتصال ({reconnects})")
+                time.sleep(1.0)
+                cap = open_capture(slug, source)
+                continue
             # Live: wall-clock capture time. File: the stream's own presentation time.
             t = time.monotonic() - started if live else cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
             if t > seconds or (max_frames and len(stamps) >= max_frames):
                 break
             if writer is None:
+                size = (frame.shape[1], frame.shape[0])
                 fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
-                writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps,
-                                         (frame.shape[1], frame.shape[0]))
+                writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
+            elif (frame.shape[1], frame.shape[0]) != size:
+                frame = cv2.resize(frame, size)   # the camera changed resolution mid-recording
             writer.write(frame)
             stamps.append(round(t, 4))
+            if progress and t - last_report >= 1.0:
+                last_report = t
+                progress(min(t / seconds, 0.99), f"تسجيل {int(t)} من {int(seconds)} ث")
     finally:
         cap.release()
         if writer is not None:
             writer.release()
     if not stamps:
+        out_path.unlink(missing_ok=True)
         raise SourceError("The source delivered no frames; nothing was recorded.")
-    out_path.with_suffix(".timestamps.json").write_text(json.dumps({"seconds": stamps}), encoding="utf-8")
+    out_path.with_suffix(".timestamps.json").write_text(json.dumps({"seconds": stamps, "reconnects": reconnects}),
+                                                        encoding="utf-8")
+    gaps = [b - a for a, b in zip(stamps, stamps[1:]) if b - a > 0.5]
     activity.log(folder, "source.record",
-                 f"سُجّل مقطع من «{source['name']}»: {len(stamps)} صورة في {stamps[-1]:.1f} ث.",
-                 f"Recorded a clip from “{source['name']}”: {len(stamps)} frames over {stamps[-1]:.1f} s.",
+                 f"سُجّل مقطع من «{source['name']}»: {len(stamps)} صورة في {stamps[-1]:.1f} ث"
+                 + (f"، مع {reconnects} إعادة اتصال و{sum(gaps):.1f} ث بلا صورة." if reconnects or gaps else "."),
+                 f"Recorded a clip from “{source['name']}”: {len(stamps)} frames over {stamps[-1]:.1f} s"
+                 + (f", with {reconnects} reconnects and {sum(gaps):.1f} s without frames." if reconnects or gaps else "."),
                  why_ar="التدريب والقياس يتمّان على تسجيلات، حتى يمكن إعادة أي نتيجة.",
                  why_en="Training and measuring use recordings, so every result can be replayed.",
                  outputs={"clip": out_path.relative_to(folder).as_posix()},
-                 numbers={"frames": len(stamps), "seconds": stamps[-1]})
+                 numbers={"frames": len(stamps), "seconds": stamps[-1], "reconnects": reconnects,
+                          "blind_seconds": round(sum(gaps), 2)})
     return out_path
+
+
+def record_and_register(slug: str, source_id: str, seconds: float, angle_id: str | None = None,
+                        progress: Callable[[float, str], None] | None = None,
+                        should_stop: Callable[[], bool] | None = None) -> dict[str, Any]:
+    """Record, then register the clip. A recording is never deleted because of its angle: without
+    an explicit angle id each camera (and resolution) gets its own."""
+    from ..ingest import IngestError, add_video
+    from ..ingest.media import probe_video
+
+    source = get_source(slug, source_id)
+    clip = record(slug, source_id, seconds, progress=progress, should_stop=should_stop)
+    info, _ = probe_video(clip)
+    angle = angle_id or default_angle(source, info["width"], info["height"])
+    try:
+        return add_video(slug, clip, angle_id=angle, source_id=source_id)
+    except IngestError:
+        if angle_id is None:
+            raise
+        # the chosen angle has another resolution: keep the clip under the camera's own angle
+        return add_video(slug, clip, angle_id=default_angle(source, info["width"], info["height"]), source_id=source_id)
 
 
 def find_stream_paths(slug: str, source_id: str) -> dict[str, Any]:
@@ -284,7 +337,10 @@ def find_stream_paths(slug: str, source_id: str) -> dict[str, Any]:
                  f"جُرّب {len(rtsp.COMMON_PATHS)} مسار معروف على «{source['name']}»: يعمل منها {len(found)}.",
                  f"{len(rtsp.COMMON_PATHS)} known paths tried on “{source['name']}”: {len(found)} work.",
                  outputs={"paths": [f["path"] for f in found]})
-    return {"tried": len(rtsp.COMMON_PATHS), "found": found}
+    # Some cameras (many Hikvision models) answer 200 to ANY path and serve their main stream:
+    # then the search proves nothing, and the maker's standard path is the right choice.
+    accepts_any = len(found) > len(rtsp.COMMON_PATHS) // 2
+    return {"tried": len(rtsp.COMMON_PATHS), "found": found, "accepts_any": accepts_any}
 
 
 def use_stream_path(slug: str, source_id: str, url_path: str) -> dict[str, Any]:

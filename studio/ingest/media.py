@@ -164,7 +164,8 @@ def add_video(slug: str, path: str | Path, *, mode: str = "link", angle_id: str 
         numbers={**info, "bytes": path.stat().st_size},
         duration_s=round(time.monotonic() - started, 2),
     )
-    return {"id": media_id, "kind": "video", "sha256": sha, "rel_path": rel_path, "linked_path": linked_path, **info}
+    return {"id": media_id, "kind": "video", "sha256": sha, "rel_path": rel_path, "linked_path": linked_path,
+            "angle_id": angle_id, **info}
 
 
 def _add_image(folder: Path, path: Path, con) -> tuple[int | None, str]:

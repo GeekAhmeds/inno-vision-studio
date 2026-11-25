@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import socket
 import urllib.request
@@ -70,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Inno Vision Studio {__version__}\n  workspace: {workspace_dir()}\n  open:      {url}\n"
               "  stop:      Ctrl+C")
         if not args.no_browser:
+            # The browser inherits this; it silences GTK's harmless "atk-bridge" notice on Linux.
+            os.environ.setdefault("NO_AT_BRIDGE", "1")
             threading.Timer(1.5, webbrowser.open, args=(url,)).start()
         uvicorn.run("studio.api:app", host=args.host, port=port, log_level="warning")
     elif args.command == "projects":

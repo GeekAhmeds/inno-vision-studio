@@ -16,7 +16,7 @@ from starlette.background import BackgroundTask
 import cv2
 from inno_count.engine import frame_at
 
-from .. import __version__, ingest, projects, sources, truth
+from .. import __version__, ingest, jobs, prelabel, projects, registry, review, sample, sources, truth
 from ..harness import run as harness_run
 from ..truth import proxy
 from ..config import current_user, workspace_dir
@@ -25,7 +25,9 @@ from ..ingest.media import IMAGE_EXT, VIDEO_EXT
 from ..sources.secrets import SecretError
 
 USER_ERRORS = (projects.ProjectError, sources.SourceError, ingest.IngestError, SecretError, truth.TruthError,
-               harness_run.HarnessError)
+               harness_run.HarnessError, registry.RegistryError, sample.SampleError, prelabel.PrelabelError,
+               review.ReviewError)
+jobs.USER_ERRORS = USER_ERRORS
 
 
 def _web_dir() -> Path:
@@ -328,13 +330,24 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{slug}/harness")
     def harness_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        projects.project_dir(slug)
+        model_path = (body.get("model_path") or "").strip()
+        if not model_path:
+            raise harness_run.HarnessError("Choose a model file (.onnx) to measure.")
+        if not Path(model_path).expanduser().is_file():
+            raise harness_run.HarnessError(f"Model file not found: {model_path}")
         fps_list = [float(f) for f in (body.get("fps_list") or [10])]
-        report = harness_run.run_harness(slug, model_path=body.get("model_path") or None,
-                                         clip_ids=body.get("clip_ids") or None, fps_list=fps_list,
-                                         tracker=body.get("tracker", "bytetrack"),
-                                         latency_s=float(body.get("latency_s") or 0))
-        return {"report_dir": report.get("report_dir"), "runs": [
-            {"fps": r["fps"], "overall": r["overall"], "conditions": r["conditions"]} for r in report["runs"]]}
+        tracker, latency = body.get("tracker", "bytetrack"), float(body.get("latency_s") or 0)
+        clip_ids = body.get("clip_ids") or None
+
+        def work(ctx: jobs.Context) -> dict[str, Any]:
+            ctx.progress(0.01, "تشغيل الموديل على مقاطع المسطرة")
+            report = harness_run.run_harness(slug, model_path=Path(model_path).expanduser(), clip_ids=clip_ids,
+                                             fps_list=fps_list, tracker=tracker, latency_s=latency)
+            return {"report_dir": report.get("report_dir"), "runs": [
+                {"fps": r["fps"], "overall": r["overall"], "conditions": r["conditions"]} for r in report["runs"]]}
+
+        return jobs.manager.submit(slug, "harness", "قياس الموديل على المسطرة", work).to_dict()
 
     @app.get("/api/projects/{slug}/reports")
     def reports_list(slug: str) -> list[dict[str, Any]]:
@@ -356,6 +369,94 @@ def create_app() -> FastAPI:
         if not path.is_file():
             raise HTTPException(404, "Not found")
         return FileResponse(path, media_type="text/html")
+
+    # ------------------------------------------------------------ jobs
+
+    @app.get("/api/projects/{slug}/jobs")
+    def jobs_list(slug: str) -> list[dict[str, Any]]:
+        return jobs.manager.list(slug)
+
+    @app.get("/api/projects/{slug}/jobs/{job_id}")
+    def job_get(slug: str, job_id: str) -> dict[str, Any]:
+        try:
+            return jobs.manager.get(slug, job_id)
+        except KeyError:
+            raise HTTPException(404, "Job not found") from None
+
+    @app.post("/api/projects/{slug}/jobs/{job_id}/cancel")
+    def job_cancel(slug: str, job_id: str) -> dict[str, Any]:
+        try:
+            return jobs.manager.cancel(job_id).to_dict()
+        except KeyError:
+            raise HTTPException(404, "Job not found (or it already ended before the studio restarted)") from None
+
+    # ------------------------------------------------------------ helper models (workspace-wide)
+
+    @app.get("/api/models")
+    def models_list() -> dict[str, Any]:
+        return {"policy": registry.policy(), "roles": registry.ROLES, "models": registry.list_models()}
+
+    @app.post("/api/models")
+    def models_add(body: dict = Body(...)) -> dict[str, Any]:
+        return registry.add_model(body.get("path", ""), body.get("name", ""), body.get("role", "detector"),
+                                  body.get("licence", ""), body.get("note", ""))
+
+    @app.delete("/api/models/{model_id}")
+    def models_remove(model_id: str) -> dict[str, bool]:
+        registry.remove_model(model_id)
+        return {"deleted": True}
+
+    @app.put("/api/models-policy")
+    def models_policy(body: dict = Body(...)) -> dict[str, str]:
+        return {"policy": registry.set_policy(body.get("policy", ""))}
+
+    # ------------------------------------------------------------ labelling
+
+    @app.post("/api/projects/{slug}/sample")
+    def sample_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        projects.project_dir(slug)
+        n = int(body["n"]) if body.get("n") is not None else 200
+        every = float(body["every_s"]) if body.get("every_s") is not None else 5.0
+        share = float(body.get("negative_share") if body.get("negative_share") is not None else 0.15)
+        ids = body.get("media_ids") or None
+        if not 1 <= n <= 5000 or every < 0.2 or not 0 <= share <= 0.5:
+            raise sample.SampleError("Frames 1–5000, scan every ≥ 0.2 s, negatives 0–50 %.")
+        return jobs.manager.submit(slug, "sample", f"اختيار {n} صورة للتسمية", lambda ctx: sample.run_sample(
+            slug, ids, n, every, share, progress=ctx.progress)).to_dict()
+
+    @app.post("/api/projects/{slug}/prelabel")
+    def prelabel_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        projects.project_dir(slug)
+        entry = registry.get_model(body.get("model_id", ""))
+        only = bool(body.get("only_unreviewed", True))
+        return jobs.manager.submit(slug, "prelabel", f"تسمية مبدئية بـ «{entry['name']}»", lambda ctx: prelabel.run_prelabel(
+            slug, entry["id"], only_unreviewed=only, progress=ctx.progress)).to_dict()
+
+    @app.post("/api/projects/{slug}/bakeoff")
+    def bakeoff_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        projects.project_dir(slug)
+        ids = [registry.get_model(i)["id"] for i in body.get("model_ids") or []]
+        if not ids:
+            raise prelabel.PrelabelError("Choose at least one detector to compare.")
+        return jobs.manager.submit(slug, "bakeoff", "مقارنة الموديلات المساعدة", lambda ctx: prelabel.run_bakeoff(
+            slug, ids, progress=ctx.progress)).to_dict()
+
+    @app.get("/api/projects/{slug}/review")
+    def review_overview(slug: str) -> dict[str, Any]:
+        return {"stats": review.stats(slug), "queue": review.queue(slug), "classes": review.class_ids(slug),
+                "blind_audit": review.blind_audit(slug)}
+
+    @app.get("/api/projects/{slug}/review/{media_id}")
+    def review_get(slug: str, media_id: int) -> dict[str, Any]:
+        return review.get_frame(slug, media_id)
+
+    @app.put("/api/projects/{slug}/review/{media_id}")
+    def review_put(slug: str, media_id: int, body: dict = Body(...)) -> dict[str, Any]:
+        return review.confirm(slug, media_id, body.get("boxes", []), bool(body.get("blind")))
+
+    @app.post("/api/projects/{slug}/review/{media_id}/reopen")
+    def review_reopen(slug: str, media_id: int) -> dict[str, Any]:
+        return review.reopen(slug, media_id)
 
     app.mount("/", StaticFiles(directory=_web_dir(), html=True), name="web")
     return app

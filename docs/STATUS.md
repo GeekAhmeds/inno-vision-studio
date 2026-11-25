@@ -54,20 +54,43 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
   its whole trip still counts. A new track needs two hits.
 - The belt calibration (four points + two distances) exists in the core and the API, not yet in the UI.
 
+## P2 — built (2026-11-25), not yet run on real footage
+
+| Part | State |
+|---|---|
+| Background jobs: one at a time (8 GB GPU), progress, cancel, history kept in the project | built, tested |
+| Harness now runs as a job (the page no longer blocks) | built |
+| Helper-model registry (workspace-wide): ONNX detectors, role, licence, hash, "may ship" | built, tested |
+| Licence policy: copyleft models help with labelling but cannot ship while policy is "permissive only" (acceptance 20) | built, tested |
+| Frame sampling: scan, motion, difference hash, time slices, farthest-point diversity, quiet frames as likely negatives, dedupe against earlier runs, no frame from a truth clip or within 10 min of it | built, tested on the simulator |
+| Pre-labelling with a registry detector: proposals stored as `auto:<name>@<sha12>` with score and truncation | built, tested with toy models |
+| Review screen: draw / select / delete boxes, class keys, "truncated", empty frame = negative, queue with unsure frames first, saved as `human:<user>` | built, exercised in a browser |
+| 5 % blind review (no proposals shown), recorded per frame, agreement compared | built |
+| Bake-off: precision, recall, F1 at IoU 0.5 against human-confirmed frames, false boxes on empty frames, "provisional" under 100 frames | built, tested |
+
+### P2 limits
+
+- **Only ONNX detectors in YOLO format** can be registered. Open-vocabulary detectors (YOLO-World,
+  OWLv2, Grounding DINO), SAM masks and embedders need PyTorch and model downloads; not built.
+  "It looks first / groups similar things" (prompt §6.1 step 3–4) waits for an embedder.
+- **GPU:** the installed `onnxruntime` is the CPU build. For the RTX 4060 install `onnxruntime-gpu`
+  (CUDA 12) in its place; the studio then picks CUDA by itself. Remote providers are never used.
+- Sampling has no global timeline: the 10-minute truth buffer applies within the same video file only.
+- The review screen has no box resize handles: delete and redraw.
+- Box classes are optional: the Counting Engine's detector is single-class; "object" is accepted.
+
 ## Known gaps
 
 - **No real camera, no real model, no real footage has been through the studio yet.**
 - **Windows:** the automated tests pass on Windows in CI, but nobody has opened the UI on a real
   Windows PC. The browser copy of truth clips needs VP8 in OpenCV's FFmpeg; if it is missing, the
   counting page falls back to single frames.
-- The harness and recording run inside the HTTP request and block the page until they end. The job
-  queue with progress is not built.
+- Recording a clip still runs inside the HTTP request (the harness, sampling and pre-labelling are jobs).
 - ONVIF discovery, USB camera names, scheduled recording, disk-space guard.
 - Timeline building, gap detection, burned-in-clock OCR (module 1).
 - The UI is plain JS. The Vue/Nuxt build named in the specification can replace it later.
 - No login. The server binds to localhost; do not expose it with `--host 0.0.0.0` on an untrusted network.
-- P2 onward: sampling, model registry, pre-labelling, review screens, Claude QA, datasets, training,
-  gate, shadow run, publish.
+- P3 onward: Claude QA, datasets, training, gate, shadow run, publish.
 
 ## Next
 

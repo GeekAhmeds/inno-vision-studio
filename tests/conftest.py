@@ -80,3 +80,23 @@ def product_root(tmp_path) -> Path:
             seed += 1
             write_image(root / name / f"img_{i}.png", seed)
     return root
+
+
+def make_constant_onnx(path, output: np.ndarray, imgsz: int) -> None:
+    onnx = pytest.importorskip("onnx")
+    from onnx import TensorProto, helper, numpy_helper
+
+    inp = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, imgsz, imgsz])
+    out = helper.make_tensor_value_info("output0", TensorProto.FLOAT, list(output.shape))
+    # output = const + 0 * mean(images): the input is used, the result is the constant
+    nodes = [
+        helper.make_node("ReduceMean", ["images"], ["m"], keepdims=0),
+        helper.make_node("Mul", ["m", "zero"], ["z"]),
+        helper.make_node("Add", ["const", "z"], ["output0"]),
+    ]
+    graph = helper.make_graph(nodes, "const", [inp], [out], initializer=[
+        numpy_helper.from_array(output.astype(np.float32), "const"),
+        numpy_helper.from_array(np.zeros((), np.float32), "zero")])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    onnx.save(model, str(path))

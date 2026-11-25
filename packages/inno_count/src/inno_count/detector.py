@@ -83,6 +83,18 @@ def decode(output: np.ndarray, conf: float, iou: float, nc: int | None = None) -
     return boxes[idx], scores[idx].astype(np.float64), classes[idx]
 
 
+PREFERRED_PROVIDERS = ["CUDAExecutionProvider", "DmlExecutionProvider", "OpenVINOExecutionProvider",
+                       "CoreMLExecutionProvider", "CPUExecutionProvider"]
+
+
+def local_providers(ort: Any) -> list[str]:
+    """Run on this machine only: GPU if the installed onnxruntime has it, then CPU. Never a remote
+    provider (some builds list "AzureExecutionProvider" first)."""
+    available = set(ort.get_available_providers())
+    chosen = [p for p in PREFERRED_PROVIDERS if p in available]
+    return chosen or ["CPUExecutionProvider"]
+
+
 def load_sidecar(model_path: Path) -> dict[str, Any]:
     side = model_path.with_suffix(".json")
     if not side.exists():
@@ -105,7 +117,7 @@ class OnnxDetector:
             raise ModelLoadError("onnxruntime is not installed. Install the core with: pip install 'inno-count[onnx]'") from exc
         self.sidecar = load_sidecar(path)
         try:
-            self.session = ort.InferenceSession(str(path), providers=providers or ort.get_available_providers())
+            self.session = ort.InferenceSession(str(path), providers=providers or local_providers(ort))
         except Exception as exc:  # onnxruntime raises several unrelated types
             raise ModelLoadError(f"The model could not be loaded: {exc}") from exc
         self.sha256 = file_sha256(path)

@@ -93,7 +93,7 @@ async function home() {
 
 // ---------------------------------------------------------------- project
 
-const TABS = { sources: "المصادر", data: "البيانات", classes: "الأنواع", counting: "خط العدّ", truth: "المسطرة", harness: "القياس", log: "ماذا حدث؟" };
+const TABS = { sources: "المصادر", data: "البيانات", classes: "الأنواع", counting: "خط العدّ", truth: "المسطرة", label: "التسمية", harness: "القياس", log: "ماذا حدث؟" };
 
 async function project(slug, tab = "sources") {
   const p = await api("/projects/" + slug);
@@ -128,7 +128,7 @@ async function project(slug, tab = "sources") {
       }) }, "حذف")),
     body);
   const reload = () => project(slug, tab);
-  const tabs = { sources: sourcesTab, data: dataTab, classes: classesTab, counting: countingTab, truth: truthTab, harness: harnessTab, log: logTab };
+  const tabs = { sources: sourcesTab, data: dataTab, classes: classesTab, counting: countingTab, truth: truthTab, label: labelTab, harness: harnessTab, log: logTab };
   await (tabs[tab] || sourcesTab)(slug, p, body, reload);
 }
 
@@ -546,36 +546,302 @@ async function reconcilePage(slug, clipId) {
 
 // ---------------------------------------------------------------- harness
 
+// ---------------------------------------------------------------- background jobs
+
+const JOB_STATE = { queued: "في الانتظار", running: "يعمل", done: "انتهى", failed: "فشل", cancelled: "أُلغي", interrupted: "توقف (أُغلق البرنامج)" };
+const pct = (v) => (v == null ? "—" : (100 * v).toFixed(1) + "%");
+
+function harnessResult(slug, r) {
+  return h("div", {}, h("table", {}, h("tr", {}, ["صورة/ث", "المسطرة", "النظام", "فائت", "زائد", "دقة النوع"].map((t) => h("th", {}, t))),
+    r.runs.map((x) => h("tr", {}, h("td", { class: "num" }, x.fps), h("td", { class: "num" }, x.overall.truth), h("td", { class: "num" }, x.overall.events),
+      h("td", { class: "num" }, `${x.overall.misses} (${pct(x.overall.miss_rate)})`), h("td", { class: "num" }, `${x.overall.extras} (${pct(x.overall.extra_rate)})`),
+      h("td", { class: "num" }, pct(x.overall.type_accuracy))))),
+    r.report_dir ? h("p", {}, h("a", { href: `/api/projects/${slug}/reports/${r.report_dir.split("/").pop()}/report.html`, target: "_blank" }, "افتح التقرير الكامل")) : null);
+}
+
+function bakeoffResult(r) {
+  return h("div", {},
+    r.enough ? null : h("p", { class: "tag warn" }, `مبدئي: ${r.frames} صورة مؤكدة فقط، والحكم يحتاج ${r.min_frames} على الأقل`),
+    h("table", {}, h("tr", {}, ["الموديل", "الترخيص", "الدقة (precision)", "الاسترجاع (recall)", "F1", "صحيح", "زائد", "فائت", "زائد على صور فاضية"].map((t) => h("th", {}, t))),
+      r.models.map((m, i) => h("tr", {}, h("td", {}, i === 0 ? "★ " : "", m.name), h("td", { dir: "ltr" }, m.licence, m.may_ship ? "" : " ⚠"),
+        h("td", { class: "num" }, pct(m.precision)), h("td", { class: "num" }, pct(m.recall)), h("td", { class: "num" }, pct(m.f1)),
+        h("td", { class: "num" }, m.tp), h("td", { class: "num" }, m.fp), h("td", { class: "num" }, m.fn), h("td", { class: "num" }, m.fp_on_empty_frames)))));
+}
+
+function jobResult(slug, j) {
+  if (j.state === "failed") return h("div", { class: "bad" }, (j.error || "").split("\n")[0]);
+  if (j.state !== "done" || !j.result) return null;
+  if (j.kind === "harness") return harnessResult(slug, j.result);
+  if (j.kind === "bakeoff") return bakeoffResult(j.result);
+  if (j.kind === "sample") return h("div", { class: "muted" }, `فُحصت ${j.result.scanned} لقطة، واختيرت ${j.result.diverse} متنوعة و${j.result.low_motion} هادئة.`);
+  if (j.kind === "prelabel") return h("div", { class: "muted" }, `${j.result.boxes} صندوق على ${j.result.images} صورة (${j.result.ms_per_image} ms للصورة، ${j.result.provider}).`);
+  return null;
+}
+
+// A card listing the project's jobs; refreshes itself while something is running.
+function jobsCard(slug, kinds, onDone) {
+  const box = h("div", { class: "card" }, h("h2", {}, "المهام"));
+  let seen = {}, timer = null;
+  let attached = false;
+  const tick = async () => {
+    if (document.body.contains(box)) attached = true;
+    else if (attached) return clearInterval(timer);   // the page moved on
+    const all = (await api(`/projects/${slug}/jobs`)).filter((j) => !kinds || kinds.includes(j.kind));
+    let active = false;
+    for (const j of all) {
+      if (["queued", "running"].includes(j.state)) active = true;
+      else if (seen[j.id] && ["queued", "running"].includes(seen[j.id]) && onDone) onDone(j);
+      seen[j.id] = j.state;
+    }
+    mount(box, h("h2", {}, "المهام"), all.length ? all.slice(0, 8).map((j) => h("div", { style: "padding:8px 0;border-bottom:1px solid var(--line)" },
+      h("div", { class: "row", style: "align-items:center" },
+        h("b", { style: "flex:1" }, j.title_ar), h("span", { class: j.state === "failed" ? "bad" : j.state === "done" ? "ok" : "muted" }, JOB_STATE[j.state] || j.state),
+        ["queued", "running"].includes(j.state) ? h("button", { onclick: act(async () => { await api(`/projects/${slug}/jobs/${j.id}/cancel`, { method: "POST" }); tick(); }) }, "إلغاء") : null),
+      ["queued", "running"].includes(j.state) ? h("div", {}, h("progress", { value: j.progress, max: 1, style: "width:100%" }), h("span", { class: "muted" }, j.message_ar)) : null,
+      jobResult(slug, j))) : h("p", { class: "muted" }, "لا توجد مهام بعد."));
+    if (active && !timer) timer = setInterval(box.refresh, 1500);
+    if (!active && timer) { clearInterval(timer); timer = null; }
+  };
+  box.refresh = () => tick().catch((e) => toast(e.message, true));
+  setTimeout(box.refresh, 0);
+  return box;
+}
+
+// ---------------------------------------------------------------- measure (harness)
+
 async function harnessTab(slug, p, body, reload) {
-  const reports = await api(`/projects/${slug}/reports`);
+  const [reports, models] = await Promise.all([api(`/projects/${slug}/reports`), api("/models")]);
+  const detectors = models.models.filter((m) => m.role === "detector");
   const model = h("input", { dir: "ltr", placeholder: "/home/me/models/bread_r2.onnx أو C:\\models\\bread_r2.onnx" });
+  const pick = h("select", { onchange: () => { if (pick.value) model.value = pick.value; } }, h("option", { value: "" }, "— من الموديلات المسجلة —"),
+    detectors.map((m) => h("option", { value: m.path }, m.name)));
   const fps = h("input", { dir: "ltr", value: "3, 5, 10, 20", style: "max-width:160px" });
   const tracker = h("select", {}, h("option", { value: "bytetrack" }, "ByteTrack (الجديد)"), h("option", { value: "greedy" }, "Greedy (القديم، للمقارنة)"));
   const latency = h("input", { type: "number", value: 0, min: 0, step: 10, style: "max-width:110px" });
-  const out = h("div");
+  const jobs = jobsCard(slug, ["harness"], () => reload());
   mount(body,
     explain("القياس يشغّل الموديل على كل مقاطع المسطرة النهائية، بنفس كود العدّ الذي يعمل في المخبز، ويطابق كل عدّة مع عدّ الإنسان.",
       "جرّب أكثر من سرعة معالجة (صورة/ث) لتعرف ما يحتاجه جهاز المخبز. «زمن الجهاز» يحاكي جهازًا أبطأ: الصور التي تصل وهو مشغول تُفقد كما في البث الحي.",
-      "النتيجة: الفائت والزائد منفصلان لكل حالة، مع تقرير فيه صور حقيقية من الأخطاء."),
+      "القياس يعمل في الخلفية: تقدر تتنقل في البرنامج وترجع، والنتيجة تظهر في «المهام»."),
     h("div", { class: "card" }, h("div", { class: "row" },
+      detectors.length ? field("موديل مسجل", pick) : null,
       field("ملف الموديل (.onnx) على هذا الجهاز", model), field("سرعات المعالجة", fps), field("المتتبّع", tracker), field("زمن الجهاز لكل صورة (ms)", latency),
       h("button", { class: "primary", onclick: act(async () => {
-        mount(out, h("p", {}, "جارٍ القياس… قد يستغرق دقائق."));
-        const r = await api(`/projects/${slug}/harness`, { method: "POST", json: {
+        await api(`/projects/${slug}/harness`, { method: "POST", json: {
           model_path: model.value.trim(), fps_list: fps.value.split(/[,،\s]+/).filter(Boolean).map(Number), tracker: tracker.value, latency_s: Number(latency.value) / 1000 } });
-        mount(out, h("table", {}, h("tr", {}, ["صورة/ث", "المسطرة", "النظام", "فائت", "زائد", "دقة النوع"].map((t) => h("th", {}, t))),
-          r.runs.map((x) => h("tr", {}, h("td", { class: "num" }, x.fps), h("td", { class: "num" }, x.overall.truth), h("td", { class: "num" }, x.overall.events),
-            h("td", { class: "num" }, `${x.overall.misses} (${(100 * x.overall.miss_rate).toFixed(1)}%)`),
-            h("td", { class: "num" }, `${x.overall.extras} (${(100 * x.overall.extra_rate).toFixed(1)}%)`),
-            h("td", { class: "num" }, x.overall.type_accuracy == null ? "—" : (100 * x.overall.type_accuracy).toFixed(1) + "%")))),
-          h("p", {}, h("a", { href: `/api/projects/${slug}/reports/${r.report_dir.split("/").pop()}/report.html`, target: "_blank" }, "افتح التقرير الكامل")));
-      }) }, "قِس")), out),
+        jobs.refresh();
+      }) }, "قِس"))),
+    jobs,
     h("div", { class: "card" }, h("h2", {}, "تقارير سابقة"), reports.length ? h("table", {},
       h("tr", {}, ["الوقت", "الموديل", "المتتبّع", "صورة/ث", "المسطرة", "فائت", "زائد", ""].map((t) => h("th", {}, t))),
       reports.map((r) => h("tr", {}, h("td", {}, when(r.created_at)), h("td", { dir: "ltr" }, r.model_sha || "—"), h("td", {}, r.tracker),
         h("td", { class: "num" }, (r.fps || []).join("، ")), h("td", { class: "num" }, r.truth), h("td", { class: "num" }, r.misses), h("td", { class: "num" }, r.extras),
         h("td", {}, h("a", { href: `/api/projects/${slug}/reports/${r.name}/report.html`, target: "_blank" }, "التقرير")))))
       : h("p", { class: "muted" }, "لا توجد تقارير بعد.")));
+}
+
+// ---------------------------------------------------------------- labelling
+
+async function labelTab(slug, p, body, reload) {
+  const [models, videos, rv] = await Promise.all([api("/models"), api(`/projects/${slug}/media?kind=video`), api(`/projects/${slug}/review`)]);
+  const detectors = models.models.filter((m) => m.role === "detector");
+  const jobs = jobsCard(slug, ["sample", "prelabel", "bakeoff"], () => reload());
+  const st = rv.stats;
+
+  // helper models
+  const mPath = h("input", { dir: "ltr", placeholder: "/home/me/models/bread_r2.onnx" });
+  const mName = h("input", { placeholder: "مثال: r2 الحالي" });
+  const mRole = h("select", {}, Object.entries(models.roles).map(([k, v]) => h("option", { value: k }, v.ar)));
+  const mLic = h("input", { dir: "ltr", placeholder: "Apache-2.0 / MIT / AGPL-3.0 / own" });
+  const policy = h("select", { onchange: act(async () => { await api("/models-policy", { method: "PUT", json: { policy: policy.value } }); reload(); }) },
+    h("option", { value: "permissive_only" }, "مفتوح فقط (Apache / MIT / BSD)"), h("option", { value: "commercial_licence" }, "عندنا رخصة تجارية"));
+  policy.value = models.policy;
+
+  // sampling
+  const vids = videos.map((v) => h("input", { type: "checkbox", checked: true, value: v.id, style: "width:auto" }));
+  const n = h("input", { type: "number", value: 200, min: 1, max: 5000, style: "max-width:110px" });
+  const every = h("input", { type: "number", value: 5, min: 0.2, step: 0.5, style: "max-width:110px" });
+  const neg = h("input", { type: "number", value: 15, min: 0, max: 50, style: "max-width:90px" });
+
+  // prelabel / bakeoff
+  const det = h("select", {}, detectors.map((m) => h("option", { value: m.id }, m.name)));
+  const onlyNew = h("input", { type: "checkbox", checked: true, style: "width:auto" });
+  const bake = detectors.map((m) => h("input", { type: "checkbox", checked: true, value: m.id, style: "width:auto" }));
+  const names = Object.fromEntries(p.classes.map((c) => [c.id, c.display_name])); names.object = "عنصر (بدون نوع)";
+
+  mount(body,
+    explain("هنا تُصنع بيانات التدريب: البرنامج يختار صورًا متنوعة من الفيديو، وموديل مساعد يقترح صناديق، وأنت تراجع وتؤكد.",
+      "لا شيء يدخل التدريب إلا ما أكّده إنسان. اقتراحات الموديلات تبقى محفوظة لمقارنتها بتسميتك.",
+      "الترتيب: 1) سجّل موديل مساعد  2) اختر صورًا  3) تسمية مبدئية  4) راجع  5) قارن الموديلات بعد 100 صورة مؤكدة على الأقل."),
+
+    h("div", { class: "card" }, h("h2", {}, "1. الموديلات المساعدة (لكل المشاريع)"),
+      h("p", { class: "muted" }, "سياسة الترخيص: موديل بترخيص AGPL/GPL يساعد في التسمية هنا، لكنه لا يُشحن لجهاز عميل إلا إذا كانت عندنا رخصة تجارية (القرار D6)."),
+      h("div", { class: "row" }, field("سياسة الترخيص", policy)),
+      models.models.length ? h("table", { style: "margin-top:10px" }, h("tr", {}, ["الاسم", "الدور", "الترخيص", "يُشحن للعميل؟", "الأنواع", ""].map((t) => h("th", {}, t))),
+        models.models.map((m) => h("tr", {}, h("td", {}, m.name, m.missing ? h("span", { class: "tag warn" }, "الملف غير موجود") : null),
+          h("td", {}, models.roles[m.role].ar), h("td", { dir: "ltr" }, m.licence),
+          h("td", {}, m.may_ship ? h("span", { class: "ok" }, "نعم") : h("span", { class: "tag warn" }, "لا")),
+          h("td", { dir: "ltr" }, (m.names || []).join(", ") || "—"),
+          h("td", {}, h("button", { class: "danger", onclick: act(async () => { if (confirm("إزالة الموديل من السجل؟ الملف نفسه لا يُحذف.")) { await api(`/models/${m.id}`, { method: "DELETE" }); reload(); } }) }, "إزالة")))))
+        : h("p", { class: "muted" }, "لا توجد موديلات مسجلة."),
+      h("div", { class: "row", style: "margin-top:10px" }, field("مسار ملف الموديل (.onnx)", mPath), field("الاسم", mName), field("الدور", mRole), field("الترخيص", mLic),
+        h("button", { class: "primary", onclick: act(async () => {
+          await api("/models", { method: "POST", json: { path: mPath.value.trim(), name: mName.value, role: mRole.value, licence: mLic.value } }); reload();
+        }) }, "تسجيل")),
+      h("p", { class: "muted" }, "الموديلات التي تكتب أي شيء بالوصف (YOLO-World / OWLv2 / Grounding DINO) لم تُدعم بعد؛ المدعوم الآن أي كاشف ONNX بصيغة YOLO.")),
+
+    h("div", { class: "card" }, h("h2", {}, "2. اختيار صور للتسمية"),
+      h("p", { class: "muted" }, "يفحص الفيديو ويختار صورًا مختلفة عن بعضها وموزعة على الوقت، مع نسبة من اللقطات الهادئة (يُحتمل أنها سير فاضي) كأمثلة سلبية. لا يأخذ أي صورة من مقاطع المسطرة ولا من 10 دقائق حولها."),
+      videos.length ? h("div", {}, videos.map((v, i) => h("label", { style: "display:flex;flex-direction:row;gap:6px;align-items:center" }, vids[i], `#${v.id} ${v.origin_name}`)),
+        h("div", { class: "row", style: "margin-top:8px" }, field("عدد الصور", n), field("افحص كل (ثانية)", every), field("نسبة الهادئة %", neg),
+          h("button", { class: "primary", onclick: act(async () => {
+            await api(`/projects/${slug}/sample`, { method: "POST", json: { media_ids: vids.filter((c) => c.checked).map((c) => Number(c.value)), n: Number(n.value), every_s: Number(every.value), negative_share: Number(neg.value) / 100 } });
+            jobs.refresh();
+          }) }, "اختر")))
+        : h("p", {}, "أضف فيديو أولًا من تبويب البيانات.")),
+
+    h("div", { class: "card" }, h("h2", {}, "3. تسمية مبدئية"),
+      detectors.length ? h("div", { class: "row" }, field("الموديل", det),
+        h("label", { style: "flex-direction:row;display:flex;gap:6px;align-items:center;flex:0 0 auto" }, onlyNew, "الصور غير المراجَعة فقط"),
+        h("button", { class: "primary", onclick: act(async () => { await api(`/projects/${slug}/prelabel`, { method: "POST", json: { model_id: det.value, only_unreviewed: onlyNew.checked } }); jobs.refresh(); }) }, "ابدأ"))
+        : h("p", { class: "muted" }, "سجّل كاشفًا في الخطوة 1 أولًا.")),
+
+    h("div", { class: "card" }, h("h2", {}, "4. المراجعة"),
+      h("div", { class: "stats" },
+        h("span", {}, "صور ", h("b", {}, st.images)), h("span", {}, "مؤكدة ", h("b", {}, st.confirmed)), h("span", {}, "منها فاضية ", h("b", {}, st.negatives)),
+        h("span", {}, "باقي ", h("b", {}, st.remaining)), h("span", {}, "صناديق مقطوعة ", h("b", {}, st.truncated_boxes)),
+        Object.entries(st.boxes_per_class).map(([k, v]) => h("span", {}, names[k] || k, " ", h("b", {}, v)))),
+      h("div", { class: "row", style: "margin-top:10px" },
+        h("button", { class: "primary", disabled: !rv.queue.length, onclick: () => (location.hash = `#/p/${slug}/review`) }, rv.queue.length ? "ابدأ المراجعة" : "لا توجد صور للمراجعة"))),
+
+    h("div", { class: "card" }, h("h2", {}, "5. مقارنة الموديلات المساعدة"),
+      h("p", { class: "muted" }, "يشغّل كل موديل على الصور التي أكّدتها ويقارن صناديقه بصناديقك. الموديل يُختار بالقياس، لا بالاسم."),
+      detectors.length ? h("div", {}, detectors.map((m, i) => h("label", { style: "display:flex;flex-direction:row;gap:6px;align-items:center" }, bake[i], m.name)),
+        h("button", { class: "primary", style: "margin-top:8px", disabled: !st.confirmed, onclick: act(async () => {
+          await api(`/projects/${slug}/bakeoff`, { method: "POST", json: { model_ids: bake.filter((c) => c.checked).map((c) => c.value) } }); jobs.refresh();
+        }) }, st.confirmed ? "قارن" : "أكّد صورًا أولًا")) : h("p", { class: "muted" }, "لا توجد كواشف مسجلة.")),
+    jobs);
+}
+
+// ---------------------------------------------------------------- review page (box editor)
+
+const COLOURS = ["#2563eb", "#d97706", "#059669", "#db2777", "#7c3aed", "#0891b2", "#65a30d"];
+
+async function reviewPage(slug, mediaId) {
+  const p = await api("/projects/" + slug);
+  const ov = await api(`/projects/${slug}/review`);
+  if (!mediaId) mediaId = ov.queue[0];
+  const back = h("a", { href: `#/p/${slug}/label` }, "← التسمية");
+  if (!mediaId) { mount(view, back, h("h1", {}, "لا توجد صور للمراجعة"), explain("كل الصور مؤكدة. اختر صورًا جديدة من تبويب التسمية.")); return; }
+  const fr = await api(`/projects/${slug}/review/${mediaId}`);
+  const classes = ov.classes;
+  const label = Object.fromEntries(p.classes.map((c) => [c.id, c.display_name])); label.object = "عنصر";
+  const colour = (c) => COLOURS[Math.max(0, classes.indexOf(c)) % COLOURS.length];
+  const provs = Object.keys(fr.proposals);
+  let prov = provs[0] || null, thr = 0.25, current = classes[0], sel = -1;
+  const blind = fr.blind && fr.review !== "confirmed";
+  const fromProposals = () => (prov ? fr.proposals[prov].filter((b) => b.score >= thr).map((b) => ({ ...b, class_id: classes.includes(b.class_id) ? b.class_id : current })) : []);
+  let boxes = fr.review === "confirmed" ? fr.human.map((b) => ({ ...b })) : blind ? [] : fromProposals();
+
+  const img = new Image();
+  img.src = `/api/projects/${slug}/file/${fr.rel_path}`;
+  await new Promise((r, e) => { img.onload = r; img.onerror = () => e(new Error("تعذّر تحميل الصورة")); });
+  const W = img.naturalWidth, H = img.naturalHeight;
+  const canvas = h("canvas", { width: W, height: H, style: "width:100%;display:block;border-radius:8px;cursor:crosshair;touch-action:none" });
+  const ctx = canvas.getContext("2d");
+  const list = h("div");
+  const idx = ov.queue.indexOf(mediaId);
+
+  const draw = (drag) => {
+    ctx.drawImage(img, 0, 0);
+    const lw = Math.max(2, W / 400);
+    if (!blind && prov) for (const b of fr.proposals[prov]) {
+      if (b.score < thr) continue;
+      ctx.setLineDash([lw * 3, lw * 3]); ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = lw;
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+    }
+    ctx.setLineDash([]);
+    boxes.forEach((b, i) => {
+      ctx.lineWidth = i === sel ? lw * 2.5 : lw * 1.5; ctx.strokeStyle = colour(b.class_id);
+      if (b.truncated) ctx.setLineDash([lw * 4, lw * 2]);
+      ctx.strokeRect(b.x, b.y, b.w, b.h); ctx.setLineDash([]);
+      ctx.fillStyle = colour(b.class_id); ctx.font = `${Math.max(12, W / 70)}px sans-serif`;
+      ctx.fillText(String(i + 1) + (b.truncated ? " ✂" : ""), b.x + 3, b.y + Math.max(12, W / 70));
+    });
+    if (drag) { ctx.strokeStyle = "#f59e0b"; ctx.lineWidth = lw * 1.5; ctx.strokeRect(drag.x, drag.y, drag.w, drag.h); }
+    mount(list, boxes.length ? boxes.map((b, i) => h("div", { class: "row", style: `align-items:center;padding:4px;border-radius:6px;${i === sel ? "background:var(--bg)" : ""}` },
+      h("b", { style: `color:${colour(b.class_id)};min-width:24px` }, i + 1),
+      h("select", { onchange: (ev) => { b.class_id = ev.target.value; draw(); } }, classes.map((c) => h("option", { value: c, selected: c === b.class_id }, label[c] || c))),
+      h("label", { style: "flex-direction:row;display:flex;gap:4px;align-items:center;flex:0 0 auto" },
+        h("input", { type: "checkbox", style: "width:auto", checked: b.truncated, onchange: (ev) => { b.truncated = ev.target.checked; draw(); } }), "مقطوع"),
+      h("button", { class: "danger", onclick: () => { boxes.splice(i, 1); sel = -1; draw(); } }, "حذف")))
+      : h("p", { class: "muted" }, "لا صناديق: سيُحفظ كصورة فاضية (مثال سلبي)."));
+  };
+
+  const pt = (ev) => { const r = canvas.getBoundingClientRect(); return { x: (ev.clientX - r.left) * W / r.width, y: (ev.clientY - r.top) * H / r.height }; };
+  let start = null;
+  canvas.addEventListener("pointerdown", (ev) => {
+    const q = pt(ev);
+    const hit = boxes.map((b, i) => [b, i]).filter(([b]) => q.x >= b.x && q.x <= b.x + b.w && q.y >= b.y && q.y <= b.y + b.h).sort((a, b) => a[0].w * a[0].h - b[0].w * b[0].h)[0];
+    if (hit) { sel = hit[1]; draw(); return; }
+    start = q; canvas.setPointerCapture(ev.pointerId);
+  });
+  canvas.addEventListener("pointermove", (ev) => { if (!start) return; const q = pt(ev); draw({ x: Math.min(start.x, q.x), y: Math.min(start.y, q.y), w: Math.abs(q.x - start.x), h: Math.abs(q.y - start.y) }); });
+  canvas.addEventListener("pointerup", (ev) => {
+    if (!start) return; const q = pt(ev);
+    const b = { x: Math.min(start.x, q.x), y: Math.min(start.y, q.y), w: Math.abs(q.x - start.x), h: Math.abs(q.y - start.y), class_id: current, truncated: false };
+    start = null;
+    if (b.w > 4 && b.h > 4) { const m = Math.max(3, W / 300); b.truncated = b.x <= m || b.y <= m || b.x + b.w >= W - m || b.y + b.h >= H - m; boxes.push(b); sel = boxes.length - 1; }
+    draw();
+  });
+
+  const go = (id) => { location.hash = id ? `#/p/${slug}/review/${id}` : `#/p/${slug}/review`; };
+  const save = async () => {
+    await api(`/projects/${slug}/review/${mediaId}`, { method: "PUT", json: { boxes, blind } });
+    const nxt = (await api(`/projects/${slug}/review`)).queue[0];
+    toast(`حُفظت (${boxes.length} صندوق)`);
+    if (nxt) go(nxt); else go(null);
+  };
+  const classBtns = h("div", { class: "row" });
+  const renderClassBtns = () => mount(classBtns, classes.map((c, i) => h("button", { class: c === current ? "primary" : "", onclick: () => { current = c; if (sel >= 0) boxes[sel].class_id = c; renderClassBtns(); draw(); } }, `${i + 1} · ${label[c] || c}`)));
+  const onKey = (ev) => {
+    if (!document.body.contains(canvas)) return document.removeEventListener("keydown", onKey);
+    if (["INPUT", "SELECT"].includes(ev.target.tagName)) return;
+    if ((ev.key === "Delete" || ev.key === "Backspace") && sel >= 0) { boxes.splice(sel, 1); sel = -1; draw(); ev.preventDefault(); }
+    else if (/^[1-9]$/.test(ev.key) && classes[+ev.key - 1]) { current = classes[+ev.key - 1]; if (sel >= 0) boxes[sel].class_id = current; renderClassBtns(); draw(); }
+    else if ((ev.key === "t" || ev.key === "T" || ev.key === "ف") && sel >= 0) { boxes[sel].truncated = !boxes[sel].truncated; draw(); }
+    else if (ev.key === "Enter") { ev.preventDefault(); save().catch((e) => toast(e.message, true)); }
+    else if (ev.key === "Escape") { sel = -1; draw(); }
+  };
+  document.addEventListener("keydown", onKey);
+  renderClassBtns();
+
+  const thrInput = h("input", { type: "range", min: 0.05, max: 0.95, step: 0.05, value: thr, style: "width:160px", oninput: (ev) => { thr = Number(ev.target.value); thrLabel.textContent = thr.toFixed(2); draw(); } });
+  const thrLabel = h("span", { class: "num" }, thr.toFixed(2));
+  const src = fr.source_media_id ? `من الفيديو #${fr.source_media_id} عند ${fmtTime(fr.source_t)}` : fr.origin_name;
+  mount(view, back,
+    h("h1", {}, `مراجعة الصورة #${mediaId}`),
+    h("div", { class: "muted" }, src, fr.sample_reason === "low_motion" ? " · لقطة هادئة: غالبًا فاضية" : "",
+      fr.review === "confirmed" ? ` · مؤكدة (${fr.reviewed_by})` : "", idx >= 0 ? ` · ${idx + 1} من ${ov.queue.length} في الطابور` : ""),
+    blind ? h("div", { class: "card", style: "border-color:var(--warn)" }, "مراجعة عمياء: هذه الصورة من الـ 5% التي تُراجع دون اقتراحات الموديل، لقياس هل التأكيد السريع يتبع الاقتراح الخطأ. ارسم الصناديق بنفسك.") : null,
+    explain("ارسم صندوقًا بالسحب على كل رغيف ظاهر. اضغط على صندوق لتحديده. الأرقام 1–9 تغيّر نوعه، Delete يحذفه، حرف T يعلّمه «مقطوع» (عند حافة الصورة)، Enter يحفظ وينتقل للتالي.",
+      "الخط المتقطع الأبيض: اقتراحات الموديل. لا تحتاج تحديد النوع لكل صندوق: «عنصر» يكفي لكاشف العدّ.",
+      "لا ترسم صندوقًا واحدًا على رغيفين. الرغيف المقطوع عند الحافة يُرسم ويُعلَّم «مقطوع». صورة بلا أي رغيف تُحفظ فاضية: هذه أمثلة سلبية مهمة."),
+    h("div", { style: "display:grid;grid-template-columns:minmax(0,3fr) minmax(260px,1fr);gap:16px;align-items:start" },
+      h("div", { class: "card" }, canvas, h("div", { style: "margin-top:10px" }, classBtns)),
+      h("div", { class: "card" },
+        !blind && provs.length ? h("div", {},
+          field("اقتراحات من", h("select", { onchange: (ev) => { prov = ev.target.value; draw(); } }, provs.map((k) => h("option", { value: k }, k.replace(/^auto:/, ""))))),
+          h("label", {}, "أقل ثقة تُعرض: ", thrLabel, thrInput),
+          h("button", { style: "margin:8px 0", onclick: () => { boxes = fromProposals(); sel = -1; draw(); } }, "استبدل صناديقي بالاقتراحات")) : null,
+        h("h2", {}, "الصناديق"), list,
+        h("div", { class: "row", style: "margin-top:12px" },
+          h("button", { class: "primary", onclick: act(save) }, "احفظ وانتقل للتالي (Enter)"),
+          h("button", { onclick: act(async () => { boxes = []; await save(); }) }, "فاضية: لا يوجد شيء")),
+        h("div", { class: "row", style: "margin-top:8px" },
+          h("button", { onclick: () => go(ov.queue[Math.min(ov.queue.length - 1, idx + 1)] || ov.queue[0]) }, "تخطّى"),
+          fr.review === "confirmed" ? h("button", { onclick: act(async () => { await api(`/projects/${slug}/review/${mediaId}/reopen`, { method: "POST" }); go(mediaId); }) }, "أعدها للطابور") : null))));
+  draw();
 }
 
 // ---------------------------------------------------------------- router
@@ -587,6 +853,7 @@ async function route() {
     const parts = location.hash.replace(/^#\//, "").split("/").filter(Boolean);
     if (parts[0] === "p" && parts[1] && parts[2] === "truth" && parts[3] && parts[4] === "count") await countPage(parts[1], +parts[3], +parts[5]);
     else if (parts[0] === "p" && parts[1] && parts[2] === "truth" && parts[3]) await reconcilePage(parts[1], +parts[3]);
+    else if (parts[0] === "p" && parts[1] && parts[2] === "review") await reviewPage(parts[1], parts[3] ? +parts[3] : null);
     else if (parts[0] === "p" && parts[1]) await project(parts[1], parts[2]);
     else await home();
   } catch (e) { mount(view, h("div", { class: "card bad" }, e.message)); }

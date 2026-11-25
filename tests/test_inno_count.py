@@ -18,6 +18,8 @@ from inno_count.types import ClassificationEvent, CountEvent, Detection, HealthE
 
 from studio.harness.match import match
 
+from .conftest import make_constant_onnx
+
 DOWN = Line(640, 200, 0, 200)  # horizontal line; "positive" = moving down the frame
 
 
@@ -82,32 +84,12 @@ def test_decode_both_layouts_and_nms():
     assert boxes.tolist() == [[10, 10, 30, 30]] and classes.tolist() == [2]
 
 
-def _constant_onnx(path, output: np.ndarray, imgsz: int) -> None:
-    onnx = pytest.importorskip("onnx")
-    from onnx import TensorProto, helper, numpy_helper
-
-    inp = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, imgsz, imgsz])
-    out = helper.make_tensor_value_info("output0", TensorProto.FLOAT, list(output.shape))
-    # output = const + 0 * mean(images): the input is used, the result is the constant
-    nodes = [
-        helper.make_node("ReduceMean", ["images"], ["m"], keepdims=0),
-        helper.make_node("Mul", ["m", "zero"], ["z"]),
-        helper.make_node("Add", ["const", "z"], ["output0"]),
-    ]
-    graph = helper.make_graph(nodes, "const", [inp], [out], initializer=[
-        numpy_helper.from_array(output.astype(np.float32), "const"),
-        numpy_helper.from_array(np.zeros((), np.float32), "zero")])
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-    model.ir_version = 8
-    onnx.save(model, str(path))
-
-
 def test_onnx_detector_letterboxes_and_maps_boxes_back(tmp_path):
     pytest.importorskip("onnxruntime")
     # one box at letterbox (cx 32, cy 32, w 16, h 16), class 0 score 0.9
     out = np.array([[[32.0], [32.0], [16.0], [16.0], [0.9]]], dtype=np.float32)
     model = tmp_path / "toy.onnx"
-    _constant_onnx(model, out, 64)
+    make_constant_onnx(model, out, 64)
     (tmp_path / "toy.json").write_text('{"names": ["loaf"], "imgsz": 64, "conf": 0.25, "iou": 0.5}')
     det = OnnxDetector(model)
     assert det.names == ["loaf"] and len(det.sha256) == 64

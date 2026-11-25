@@ -65,7 +65,30 @@ CREATE TABLE IF NOT EXISTS truth_counts (
 """
 
 
+# Columns added after a table was first shipped: (table, column, definition).
+MIGRATIONS = [
+    ("media", "source_media_id", "INTEGER"),   # a frame sampled from a video: which video
+    ("media", "source_t", "REAL"),             # ... and at what time (seconds)
+    ("media", "phash", "TEXT"),
+    ("media", "motion", "REAL"),
+    ("media", "sample_reason", "TEXT"),
+    ("media", "review", "TEXT"),               # NULL = not reviewed; 'confirmed'
+    ("media", "reviewed_by", "TEXT"),
+    ("media", "reviewed_at", "TEXT"),
+    ("media", "review_blind", "INTEGER"),      # 1 = reviewed without seeing model proposals
+    ("labels", "score", "REAL"),
+    ("labels", "truncated", "INTEGER NOT NULL DEFAULT 0"),
+]
+
 _ready: set[str] = set()
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    con.executescript(SCHEMA)
+    for table, column, definition in MIGRATIONS:
+        have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 @contextmanager
@@ -76,7 +99,8 @@ def connect(project_dir: Path) -> Iterator[sqlite3.Connection]:
     con.execute("PRAGMA foreign_keys = ON")
     key = str(path.resolve())
     if key not in _ready:  # bring older project databases up to the current schema
-        con.executescript(SCHEMA)
+        _migrate(con)
+        con.commit()
         _ready.add(key)
     try:
         yield con
@@ -87,7 +111,7 @@ def connect(project_dir: Path) -> Iterator[sqlite3.Connection]:
 
 def init(project_dir: Path) -> None:
     with connect(project_dir) as con:
-        con.executescript(SCHEMA)
+        _migrate(con)
     _ready.add(str((project_dir / DB_FILE).resolve()))
 
 

@@ -129,8 +129,9 @@ def test_connection(slug: str, source_id: str, frames: int = 20) -> dict[str, An
             if not user:
                 return fail("الكاميرا تطلب اسم مستخدم وكلمة سر. احذف المصدر وأضفه بهما.",
                             "The camera asks for a user name and password. Remove the source and add it with them.")
-            return fail(f"الكاميرا رفضت اسم المستخدم «{user}» أو كلمة السر (401). راجعهما من إعدادات الكاميرا أو الـ NVR. "
-                        "انتبه: بعض الكاميرات تقفل الحساب مؤقتًا بعد عدة محاولات خاطئة.",
+            return fail(f"الكاميرا رفضت اسم المستخدم «{user}» أو كلمة السر (401). لو نفس البيانات كانت شغالة قبل كده، "
+                        "فالكاميرا غالبًا قفلت الحساب مؤقتًا بعد محاولات كثيرة (Hikvision تقفله حوالي 30 دقيقة): "
+                        "استنَّ نصف ساعة أو افتحه من صفحة الكاميرا، ثم جرّب مرة واحدة.",
                         f"The camera refused user “{user}” or the password (401). Check them in the camera or NVR settings. "
                         "Some cameras lock the account for a while after several wrong tries.")
         if answer is not None and answer.status == 404:
@@ -260,7 +261,12 @@ def find_stream_paths(slug: str, source_id: str) -> dict[str, Any]:
         raise SourceError("Camera unreachable. Check the address and the network first.")
     password = secrets.get_password(slug, source_id)
     user, _ = rtsp.credentials(url, password)
-    found = rtsp.find_paths(url, user, password)
+    try:
+        found = rtsp.find_paths(url, user, password)
+    except rtsp.LoginRefused:
+        raise SourceError("The camera refused the login, so the search stopped (to avoid locking the account). "
+                          "If the login worked before, the camera has probably locked the account after several tries: "
+                          "wait 30 minutes, or unlock it from the camera's web page, then try once.") from None
     activity.log(project_dir(slug), "source.find_path",
                  f"جُرّب {len(rtsp.COMMON_PATHS)} مسار معروف على «{source['name']}»: يعمل منها {len(found)}.",
                  f"{len(rtsp.COMMON_PATHS)} known paths tried on “{source['name']}”: {len(found)} work.",

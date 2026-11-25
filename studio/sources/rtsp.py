@@ -135,20 +135,86 @@ def fill(url: str, user: str | None, password: str | None) -> str:
     return url.replace("{user}", user or "admin").replace("{password}", password or "")
 
 
+class LoginRefused(OSError):
+    """The camera refused the login during a search: stop, so the account is not locked."""
+
+
+class Session:
+    """One connection, one login challenge, many DESCRIBEs. Cameras such as Hikvision lock an
+    account (often for 30 minutes) after a few refused or unauthenticated requests, so a path
+    search must not open a fresh, unauthenticated request for every path."""
+
+    def __init__(self, host: str, port: int, user: str | None, password: str | None, timeout: float = 3.0):
+        self.host, self.port, self.user, self.password, self.timeout = host, port, user, password, timeout
+        self.sock: socket.socket | None = None
+        self.cseq = 0
+        self.challenge = ""
+
+    def _connect(self) -> None:
+        self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        self.sock.settimeout(self.timeout)
+
+    def close(self) -> None:
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+
+    def describe(self, url: str) -> int:
+        for attempt in range(2):            # one reconnect if the camera closed the connection
+            try:
+                if self.sock is None:
+                    self._connect()
+                self.cseq += 1
+                extra = ""
+                if self.challenge and self.user:
+                    if self.challenge.lower().startswith("digest"):
+                        extra = f"Authorization: {_digest(self.challenge, self.user, self.password or '', 'DESCRIBE', url)}\r\n"
+                    else:
+                        token = base64.b64encode(f"{self.user}:{self.password or ''}".encode()).decode()
+                        extra = f"Authorization: Basic {token}\r\n"
+                status, _, headers = _request(self.sock, "DESCRIBE", url, self.cseq, extra)
+                if status == 401 and not extra:
+                    self.challenge = headers.get("www-authenticate", "")
+                    if not self.challenge or not self.user:
+                        return 401
+                    return self.describe(url)
+                if status == 401:
+                    fresh = headers.get("www-authenticate", "")
+                    if "stale=true" in fresh.lower() and attempt == 0:
+                        self.challenge = fresh          # nonce expired: retry once with the new one
+                        continue
+                    raise LoginRefused("The camera refused the login.")
+                return status
+            except LoginRefused:
+                raise
+            except OSError:
+                self.close()
+                if attempt:
+                    raise
+        return 0
+
+
 def find_paths(url: str, user: str | None, password: str | None, timeout: float = 3.0) -> list[dict[str, object]]:
-    """Ask the camera for each common path; return the ones it serves (status 200)."""
+    """Ask the camera for each common path over one logged-in connection; return those it serves.
+    Stops at the first refused login (raises LoginRefused) instead of hammering the account."""
     p = urlsplit(url)
     host = p.netloc.rsplit("@", 1)[-1]
+    session = Session(p.hostname, p.port or 554, user, password, timeout)
     found = []
-    for maker, template in COMMON_PATHS:
-        stored = template.replace("{user}", user or "admin")          # "{password}" stays a placeholder
-        path, _, query = stored.partition("?")
-        candidate = fill(urlunsplit((p.scheme, host, path, query, "")), user, password)
-        try:
-            answer = describe(candidate, user, password, timeout)
-        except OSError:
-            continue
-        if answer.status == 200:
-            found.append({"maker": maker, "path": stored.replace("{password}", "******"), "url_path": stored,
-                          "has_login_in_path": "{password}" in template})
+    try:
+        for maker, template in COMMON_PATHS:
+            stored = template.replace("{user}", user or "admin")          # "{password}" stays a placeholder
+            path, _, query = stored.partition("?")
+            candidate = fill(urlunsplit((p.scheme, host, path, query, "")), user, password)
+            try:
+                status = session.describe(candidate)
+            except LoginRefused:
+                raise
+            except OSError:
+                continue
+            if status == 200:
+                found.append({"maker": maker, "path": stored.replace("{password}", "******"), "url_path": stored,
+                              "has_login_in_path": "{password}" in template})
+    finally:
+        session.close()
     return found

@@ -14,6 +14,7 @@ from studio.sources import rtsp
 from studio.sources.probe import _url_with_password
 
 USER, PASSWORD, REALM, NONCE = "admin", "Admin@123", "IP Camera", "abc123"
+STATS = {"unauth": 0, "refused": 0}
 
 
 def _serve(sock: socket.socket) -> None:
@@ -46,6 +47,7 @@ def _serve(sock: socket.socket) -> None:
                         ha2 = hashlib.md5(f"{method}:{f.get('uri')}".encode()).hexdigest()
                         ok = f.get("response") == hashlib.md5(f"{ha1}:{NONCE}:{ha2}".encode()).hexdigest() and f.get("username") == USER
                     if not ok:
+                        STATS["refused" if auth else "unauth"] += 1
                         resp = (f"RTSP/1.0 401 Unauthorized\r\nCSeq: {cseq}\r\n"
                                 f'WWW-Authenticate: Digest realm="{REALM}", nonce="{NONCE}"\r\n\r\n')
                     elif not uri.endswith("/Streaming/Channels/101"):
@@ -119,3 +121,19 @@ def test_password_in_path_stays_a_placeholder():
     url = "rtsp://admin@10.0.0.9:554/user=admin&password={password}&channel=1&stream=0.sdp"
     assert rtsp.fill(url, "admin", "s3cret").endswith("password=s3cret&channel=1&stream=0.sdp")
     assert "s3cret" in _url_with_password(url, "s3cret") and "{password}" not in _url_with_password(url, "s3cret")
+
+
+def test_path_search_uses_one_login_and_stops_when_refused(camera, workspace):
+    """Cameras lock the account after a few refused or unauthenticated requests."""
+    STATS.update(unauth=0, refused=0)
+    found = rtsp.find_paths(f"rtsp://admin@127.0.0.1:{camera}/x", USER, PASSWORD)
+    assert [f["url_path"] for f in found] == ["/Streaming/Channels/101"]
+    assert STATS["unauth"] <= 2 and STATS["refused"] == 0, STATS
+    STATS.update(unauth=0, refused=0)
+    with pytest.raises(rtsp.LoginRefused):
+        rtsp.find_paths(f"rtsp://admin@127.0.0.1:{camera}/x", USER, "wrong")
+    assert STATS["refused"] == 1, "one refused login, then stop"
+    slug = projects.create_project("Cam4")["slug"]
+    src = sources.add_source(slug, "ip", "cam", url=f"rtsp://admin@127.0.0.1:{camera}/x", password="wrong")
+    with pytest.raises(sources.SourceError, match="stopped"):
+        sources.find_stream_paths(slug, src["id"])

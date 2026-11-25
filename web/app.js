@@ -175,6 +175,14 @@ async function sourcesTab(slug, p, body, reload) {
 
 function sourceCard(slug, s, reload) {
   const out = h("div");
+  const lUrl = h("input", { dir: "ltr", value: s.params.url || "" });
+  const lUser = h("input", { dir: "ltr", value: (s.params.url || "").match(/\/\/([^@/]+)@/)?.[1] || "" });
+  const lPass = h("input", { dir: "ltr", type: "password", placeholder: "اتركها فاضية لو مش هتغيرها" });
+  const login = h("div", { class: "row", style: "margin-top:10px", hidden: true }, field("عنوان البث", lUrl), field("اسم المستخدم", lUser), field("كلمة السر", lPass),
+    h("button", { class: "primary", onclick: act(async () => {
+      await api(`/projects/${slug}/sources/${s.id}`, { method: "PATCH", json: { url: lUrl.value.trim(), user: decodeURIComponent(lUser.value.trim()), password: lPass.value } });
+      toast("حُفظت بيانات الدخول. اضغط «اختبار الاتصال»."); reload();
+    }) }, "حفظ"));
   const seconds = h("input", { type: "number", value: 60, min: 1, max: 3600, style: "max-width:110px" });
   return h("div", { class: "card" },
     h("h2", {}, s.name), h("div", { class: "muted", dir: "ltr" }, META.source_kinds[s.kind].en, " · ", s.params.url || s.params.path || `device ${s.params.device}`,
@@ -194,10 +202,11 @@ function sourceCard(slug, s, reload) {
         const m = await api(`/projects/${slug}/sources/${s.id}/record`, { method: "POST", json: { seconds: Number(seconds.value) } });
         mount(out, h("div", { class: "ok" }, `سُجّل مقطع ${m.width}×${m.height}، ${m.frames} صورة. تجده في تبويب البيانات.`));
       }) }, "تسجيل مقطع"),
+      ["ip", "nvr"].includes(s.kind) ? h("button", { onclick: () => { login.hidden = !login.hidden; } }, "تعديل الدخول") : null,
       h("button", { class: "danger", onclick: act(async () => {
         if (confirm("حذف هذا المصدر؟ التسجيلات السابقة تبقى.")) { await api(`/projects/${slug}/sources/${s.id}`, { method: "DELETE" }); reload(); }
       }) }, "حذف")),
-    out);
+    login, out);
 }
 
 async function dataTab(slug, p, body, reload) {

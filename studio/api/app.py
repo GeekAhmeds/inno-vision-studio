@@ -149,6 +149,10 @@ def create_app() -> FastAPI:
                                   device=body.get("device"), path=body.get("path", ""),
                                   password=body.get("password") or None)
 
+    @app.patch("/api/projects/{slug}/sources/{source_id}")
+    def source_login(slug: str, source_id: str, body: dict = Body(...)) -> dict[str, Any]:
+        return sources.update_login(slug, source_id, body.get("url") or None, body.get("user"), body.get("password") or None)
+
     @app.delete("/api/projects/{slug}/sources/{source_id}")
     def source_remove(slug: str, source_id: str) -> dict[str, bool]:
         sources.remove_source(slug, source_id)

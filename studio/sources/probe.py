@@ -13,14 +13,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+import os
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
-import cv2
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")   # keep OpenCV's own warnings out of the terminal
+import cv2  # noqa: E402
 
-from ..explain import activity
-from ..projects import project_dir
-from . import secrets
-from .store import SourceError, get_source
+from ..explain import activity  # noqa: E402
+from ..projects import project_dir  # noqa: E402
+from . import rtsp, secrets  # noqa: E402
+from .store import SourceError, _dir, get_source  # noqa: E402
 
 DEFAULT_PORTS = {"rtsp": 554, "rtsps": 322, "http": 80, "https": 443}
 
@@ -33,14 +35,28 @@ def _usb_backend() -> int:
     return cv2.CAP_ANY
 
 
-def _url_with_password(url: str, password: str | None) -> str:
+def _url_with_password(url: str, password: str | None, style: str = "raw") -> str:
+    """Put the login into the URL the way FFmpeg reads it.
+
+    FFmpeg's RTSP client does not decode %-escapes in the login, so a password like "Admin@123"
+    must go in as is ("raw"); FFmpeg takes the LAST "@" before the host. Only a password containing
+    "/", "?" or "#" cannot be written raw; then the escaped form is tried."""
     if not password:
         return url
     parts = urlsplit(url)
-    user = parts.username or "admin"
+    user = unquote(parts.username) if parts.username else "admin"
     host = parts.netloc.rsplit("@", 1)[-1]
-    return urlunsplit((parts.scheme, f"{quote(user, safe='')}:{quote(password, safe='')}@{host}",
-                       parts.path, parts.query, parts.fragment))
+    if style == "encoded":
+        login = f"{quote(user, safe='')}:{quote(password, safe='')}"
+    else:
+        login = f"{user}:{password}"
+    return urlunsplit((parts.scheme, f"{login}@{host}", parts.path, parts.query, parts.fragment))
+
+
+def _styles(password: str | None) -> list[str]:
+    if not password:
+        return ["raw"]
+    return ["encoded", "raw"] if any(ch in password for ch in "/?#") else ["raw", "encoded"]
 
 
 def _reachable(url: str, timeout: float = 3.0) -> bool:
@@ -56,8 +72,9 @@ def _reachable(url: str, timeout: float = 3.0) -> bool:
 def open_capture(slug: str, source: dict[str, Any]) -> cv2.VideoCapture:
     kind, params = source["kind"], source["params"]
     if kind in ("ip", "nvr"):
-        url = _url_with_password(params["url"], secrets.get_password(slug, source["id"]))
-        return cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        password = secrets.get_password(slug, source["id"])
+        style = params.get("credential_style") or _styles(password)[0]
+        return cv2.VideoCapture(_url_with_password(params["url"], password, style), cv2.CAP_FFMPEG)
     if kind == "usb":
         return cv2.VideoCapture(int(params["device"]), _usb_backend())
     return cv2.VideoCapture(params["path"])
@@ -93,10 +110,51 @@ def test_connection(slug: str, source_id: str, frames: int = 20) -> dict[str, An
     if kind in ("ip", "nvr") and not _reachable(params["url"]):
         return fail("الكاميرا غير متاحة على الشبكة. راجع العنوان والمنفذ وأن الجهاز على نفس الشبكة.",
                     "Camera unreachable. Check the address, the port, and that this PC is on the same network.")
+    password = secrets.get_password(slug, source_id) if kind in ("ip", "nvr") else None
+    if kind in ("ip", "nvr") and source.get("has_password") and password is None:
+        return fail("كلمة سر الكاميرا غير موجودة في خزنة النظام (keyring). احذف المصدر وأضفه من جديد، "
+                    "وتأكد أن خزنة النظام (GNOME Keyring / KWallet) مفتوحة.",
+                    "The camera password is not in the system keyring. Remove and add the source again, "
+                    "and make sure the keyring (GNOME Keyring / KWallet) is unlocked.")
+    if kind in ("ip", "nvr") and params["url"].startswith("rtsp://"):
+        user, _ = rtsp.credentials(params["url"], password)
+        try:
+            answer = rtsp.describe(params["url"], user, password)
+        except OSError:
+            answer = None   # not a plain RTSP server (or a timeout): let OpenCV try and report
+        if answer is not None and answer.status == 401:
+            if not user:
+                return fail("الكاميرا تطلب اسم مستخدم وكلمة سر. احذف المصدر وأضفه بهما.",
+                            "The camera asks for a user name and password. Remove the source and add it with them.")
+            return fail(f"الكاميرا رفضت اسم المستخدم «{user}» أو كلمة السر (401). راجعهما من إعدادات الكاميرا أو الـ NVR. "
+                        "انتبه: بعض الكاميرات تقفل الحساب مؤقتًا بعد عدة محاولات خاطئة.",
+                        f"The camera refused user “{user}” or the password (401). Check them in the camera or NVR settings. "
+                        "Some cameras lock the account for a while after several wrong tries.")
+        if answer is not None and answer.status == 404:
+            return fail("الكاميرا قبلت الدخول لكن مسار البث غير موجود (404). أمثلة: Hikvision ‎/Streaming/Channels/101، "
+                        "Dahua ‎/cam/realmonitor?channel=1&subtype=0.",
+                        "Login accepted but the stream path does not exist (404). Examples: Hikvision /Streaming/Channels/101, "
+                        "Dahua /cam/realmonitor?channel=1&subtype=0.")
+        if answer is not None and answer.status >= 400:
+            return fail(f"الكاميرا ردّت بخطأ {answer.status} ({answer.reason}).",
+                        f"The camera answered {answer.status} ({answer.reason}).")
     if kind == "video" and not Path(params["path"]).is_file():
         return fail("ملف الفيديو غير موجود في مكانه.", "The video file is no longer at its path.")
 
-    cap = open_capture(slug, source)
+    if kind in ("ip", "nvr"):
+        cap = None
+        for style in _styles(password):   # find how this camera's FFmpeg login must be written
+            cap = cv2.VideoCapture(_url_with_password(params["url"], password, style), cv2.CAP_FFMPEG)
+            if cap.isOpened():
+                if source["params"].get("credential_style") != style:
+                    source["params"]["credential_style"] = style
+                    import yaml
+                    (_dir(slug) / f"{source_id}.yaml").write_text(
+                        yaml.safe_dump(source, allow_unicode=True, sort_keys=False), encoding="utf-8")
+                break
+            cap.release()
+    else:
+        cap = open_capture(slug, source)
     try:
         if not cap.isOpened():
             if kind in ("ip", "nvr"):

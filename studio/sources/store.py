@@ -96,6 +96,36 @@ def get_source(slug: str, source_id: str) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def update_login(slug: str, source_id: str, url: str | None = None, user: str | None = None,
+                 password: str | None = None) -> dict[str, Any]:
+    """Change a camera's address, user name or password without removing the source."""
+    from urllib.parse import quote
+
+    source = get_source(slug, source_id)
+    if source["kind"] not in ("ip", "nvr"):
+        raise SourceError("Only network cameras have a login.")
+    current = source["params"]["url"]
+    if url:
+        if not re.match(r"^(rtsp|rtsps|http|https)://", url):
+            raise SourceError("The camera address must start with rtsp:// or http://")
+        current, embedded = split_credentials(url)
+        password = password or embedded
+    if user is not None:
+        parts = urlsplit(current)
+        host = parts.netloc.rsplit("@", 1)[-1]
+        netloc = f"{quote(user.strip(), safe='')}@{host}" if user.strip() else host
+        current = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    source["params"]["url"] = current
+    source["params"].pop("credential_style", None)
+    if password:
+        secrets.set_password(slug, source_id, password)
+        source["has_password"] = True
+    (_dir(slug) / f"{source_id}.yaml").write_text(yaml.safe_dump(source, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    activity.log(project_dir(slug), "source.login", f"عُدّلت بيانات الدخول للمصدر «{source['name']}».",
+                 f"Login of source “{source['name']}” changed.")
+    return source
+
+
 def remove_source(slug: str, source_id: str) -> None:
     source = get_source(slug, source_id)
     secrets.delete_password(slug, source_id)

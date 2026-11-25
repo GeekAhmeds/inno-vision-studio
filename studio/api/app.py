@@ -2,23 +2,30 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from .. import __version__, ingest, projects, sources
-from ..config import workspace_dir
+import cv2
+from inno_count.engine import frame_at
+
+from .. import __version__, ingest, projects, sources, truth
+from ..harness import run as harness_run
+from ..truth import proxy
+from ..config import current_user, workspace_dir
 from ..explain import activity
 from ..ingest.media import IMAGE_EXT, VIDEO_EXT
 from ..sources.secrets import SecretError
 
-USER_ERRORS = (projects.ProjectError, sources.SourceError, ingest.IngestError, SecretError)
+USER_ERRORS = (projects.ProjectError, sources.SourceError, ingest.IngestError, SecretError, truth.TruthError,
+               harness_run.HarnessError)
 
 
 def _web_dir() -> Path:
@@ -55,7 +62,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/meta")
     def meta() -> dict[str, Any]:
-        return {"version": __version__, "workspace": str(workspace_dir()),
+        return {"version": __version__, "workspace": str(workspace_dir()), "user": current_user(),
                 "templates": projects.TEMPLATES, "source_kinds": sources.KINDS}
 
     @app.get("/api/usb-cameras")
@@ -214,6 +221,141 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{slug}/media/product-folders-path")
     def product_folders_path(slug: str, body: dict = Body(...)) -> dict[str, Any]:
         return ingest.add_product_folders(slug, body.get("path", ""))
+
+    # ------------------------------------------------------------ counting setup
+
+    @app.get("/api/projects/{slug}/counting")
+    def counting_get(slug: str) -> dict[str, Any]:
+        folder = projects.project_dir(slug)
+        angles = []
+        for meta_file in sorted((folder / "sources" / "angles").glob("*/angle.json")):
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            meta["reference"] = (meta_file.parent / "reference.jpg").relative_to(folder).as_posix()
+            angles.append(meta)
+        return {"config": projects.get_counting(slug), "angles": angles}
+
+    @app.put("/api/projects/{slug}/counting")
+    def counting_put(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        return projects.set_counting(slug, body)
+
+    @app.get("/api/projects/{slug}/media/{media_id}/frame")
+    def media_frame(slug: str, media_id: int, t: float = 0.0, width: int = 0,
+                    mark_x: float | None = None, mark_y: float | None = None) -> Response:
+        path = harness_run.media_path(slug, media_id)
+        frame = frame_at(path, t)
+        if frame is None:
+            raise HTTPException(404, "No frame at this time.")
+        line = projects.get_counting(slug)["line"]
+        if line:
+            cv2.line(frame, (int(line[0]), int(line[1])), (int(line[2]), int(line[3])), (0, 200, 255), 2)
+        if mark_x is not None and mark_y is not None:
+            cv2.circle(frame, (int(mark_x), int(mark_y)), max(12, frame.shape[1] // 40), (255, 0, 255), 3)
+        if 0 < width < frame.shape[1]:
+            frame = cv2.resize(frame, (width, int(frame.shape[0] * width / frame.shape[1])), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return Response(buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+    # ------------------------------------------------------------ truth
+
+    def _clip_with_proxy(slug: str, clip_id: int) -> dict[str, Any]:
+        clip = truth.get_clip(slug, clip_id)
+        clip["proxy"] = proxy.status(projects.project_dir(slug), clip_id)
+        return clip
+
+    @app.get("/api/projects/{slug}/truth")
+    def truth_list(slug: str) -> dict[str, Any]:
+        return {"conditions": truth.CONDITIONS, "clips": truth.list_clips(slug),
+                "min_per_condition": harness_run.MIN_CROSSINGS_PER_CONDITION}
+
+    @app.post("/api/projects/{slug}/truth")
+    def truth_create(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        clip = truth.create_clip(slug, int(body.get("media_id", 0)), body.get("start_s", 0), body.get("end_s", 0),
+                                 body.get("condition", ""), body.get("note", ""))
+        proxy.start(harness_run.media_path(slug, clip["media_id"]), projects.project_dir(slug), clip["id"],
+                    clip["start_s"], clip["end_s"])
+        return _clip_with_proxy(slug, clip["id"])
+
+    @app.get("/api/projects/{slug}/truth/{clip_id}")
+    def truth_get(slug: str, clip_id: int) -> dict[str, Any]:
+        clip = _clip_with_proxy(slug, clip_id)
+        if clip["proxy"]["state"] == "missing":  # e.g. after an import: build it again
+            proxy.start(harness_run.media_path(slug, clip["media_id"]), projects.project_dir(slug), clip_id,
+                        clip["start_s"], clip["end_s"])
+            clip["proxy"] = {"state": "building", "progress": 0.0}
+        return clip
+
+    @app.get("/api/projects/{slug}/truth/{clip_id}/proxy.webm")
+    def truth_proxy(slug: str, clip_id: int) -> FileResponse:
+        path = proxy.proxy_dir(projects.project_dir(slug), clip_id) / "proxy.webm"
+        if proxy.status(projects.project_dir(slug), clip_id).get("state") != "ready" or not path.is_file():
+            raise HTTPException(404, "The browser copy is not ready.")
+        return FileResponse(path, media_type="video/webm")
+
+    @app.get("/api/projects/{slug}/truth/{clip_id}/stamps")
+    def truth_stamps(slug: str, clip_id: int) -> list[float]:
+        path = proxy.proxy_dir(projects.project_dir(slug), clip_id) / "stamps.json"
+        if not path.is_file():
+            raise HTTPException(404, "Not ready.")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @app.delete("/api/projects/{slug}/truth/{clip_id}")
+    def truth_delete(slug: str, clip_id: int) -> dict[str, bool]:
+        truth.delete_clip(slug, clip_id)
+        shutil.rmtree(proxy.proxy_dir(projects.project_dir(slug), clip_id), ignore_errors=True)
+        return {"deleted": True}
+
+    @app.post("/api/projects/{slug}/truth/{clip_id}/counts")
+    def truth_count_start(slug: str, clip_id: int) -> dict[str, Any]:
+        return truth.start_count(slug, clip_id)
+
+    @app.put("/api/projects/{slug}/truth-counts/{count_id}")
+    def truth_count_save(slug: str, count_id: int, body: dict = Body(...)) -> dict[str, Any]:
+        return truth.save_count(slug, count_id, body.get("taps", []), bool(body.get("finished")))
+
+    @app.get("/api/projects/{slug}/truth/{clip_id}/reconcile")
+    def truth_reconcile(slug: str, clip_id: int) -> dict[str, Any]:
+        return truth.reconcile(slug, clip_id)
+
+    @app.post("/api/projects/{slug}/truth/{clip_id}/resolve")
+    def truth_resolve(slug: str, clip_id: int, body: dict = Body(default={})) -> dict[str, Any]:
+        return truth.resolve(slug, clip_id, body.get("decisions"))
+
+    @app.post("/api/projects/{slug}/truth/{clip_id}/lock")
+    def truth_lock(slug: str, clip_id: int) -> dict[str, Any]:
+        return truth.lock_clip(slug, clip_id)
+
+    # ------------------------------------------------------------ harness
+
+    @app.post("/api/projects/{slug}/harness")
+    def harness_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        fps_list = [float(f) for f in (body.get("fps_list") or [10])]
+        report = harness_run.run_harness(slug, model_path=body.get("model_path") or None,
+                                         clip_ids=body.get("clip_ids") or None, fps_list=fps_list,
+                                         tracker=body.get("tracker", "bytetrack"),
+                                         latency_s=float(body.get("latency_s") or 0))
+        return {"report_dir": report.get("report_dir"), "runs": [
+            {"fps": r["fps"], "overall": r["overall"], "conditions": r["conditions"]} for r in report["runs"]]}
+
+    @app.get("/api/projects/{slug}/reports")
+    def reports_list(slug: str) -> list[dict[str, Any]]:
+        folder = projects.project_dir(slug) / "reports"
+        out = []
+        for d in sorted(folder.glob("harness_*"), reverse=True):
+            data = json.loads((d / "report.json").read_text(encoding="utf-8")) if (d / "report.json").exists() else {}
+            first = (data.get("runs") or [{}])[0].get("overall", {})
+            out.append({"name": d.name, "created_at": data.get("created_at"), "model_sha": data.get("model_sha", "")[:12],
+                        "tracker": data.get("tracker"), "fps": [r["fps"] for r in data.get("runs", [])],
+                        "truth": first.get("truth"), "misses": first.get("misses"), "extras": first.get("extras")})
+        return out
+
+    @app.get("/api/projects/{slug}/reports/{name}/report.html")
+    def report_html(slug: str, name: str) -> FileResponse:
+        if not name.startswith("harness_") or "/" in name or "\\" in name or ".." in name:
+            raise HTTPException(404, "Not found")
+        path = projects.project_dir(slug) / "reports" / name / "report.html"
+        if not path.is_file():
+            raise HTTPException(404, "Not found")
+        return FileResponse(path, media_type="text/html")
 
     app.mount("/", StaticFiles(directory=_web_dir(), html=True), name="web")
     return app

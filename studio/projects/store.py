@@ -199,6 +199,7 @@ def delete_project(slug: str, confirm: str) -> None:
     folder = project_dir(slug)
     if confirm != slug:
         raise ProjectError("To delete, type the project id exactly.")
+    db.forget(folder)
     shutil.rmtree(folder)
 
 
@@ -301,6 +302,7 @@ def import_project(archive: Path) -> dict[str, Any]:
     for sub in SUBDIRS:
         (folder / sub).mkdir(parents=True, exist_ok=True)
     (folder / MANIFEST_FILE).unlink(missing_ok=True)
+    db.forget(folder)
     meta = yaml.safe_load((folder / PROJECT_FILE).read_text(encoding="utf-8"))
     meta["slug"] = slug
     save_project(meta)
@@ -311,3 +313,60 @@ def import_project(archive: Path) -> dict[str, Any]:
                  numbers={"files": len(manifest["files"]), "linked_media_missing": len(missing)},
                  outputs={"linked_media_missing": missing})
     return meta
+
+
+# ---------------------------------------------------------------- counting setup
+
+COUNTING_DEFAULTS: dict[str, Any] = {
+    "line": None,               # [x1, y1, x2, y2] in frame pixels; objects count moving to its "after" side
+    "direction": "positive",    # positive | negative | both
+    "angle_id": "angle-1",
+    "hysteresis_px": 6.0,
+    "roi": None,                # [x1, y1, x2, y2] or None for the whole frame
+    "edge_margin_px": 3.0,
+    "k_crops": 5,
+    "classify_timeout_s": 2.0,
+    "calibration": None,        # {"image_points": [[x,y]x4], "width_cm": w, "length_cm": l}
+}
+
+
+def get_counting(slug: str) -> dict[str, Any]:
+    meta = get_project(slug)
+    return {**COUNTING_DEFAULTS, **(meta.get("counting") or {})}
+
+
+def set_counting(slug: str, changes: dict[str, Any]) -> dict[str, Any]:
+    meta = get_project(slug)
+    cfg = {**COUNTING_DEFAULTS, **(meta.get("counting") or {})}
+    for key, value in changes.items():
+        if key not in COUNTING_DEFAULTS:
+            raise ProjectError(f"Unknown counting setting: {key}")
+        cfg[key] = value
+    line = cfg["line"]
+    if line is not None:
+        if len(line) != 4 or (line[0], line[1]) == (line[2], line[3]):
+            raise ProjectError("The counting line needs two different points.")
+        cfg["line"] = [round(float(v), 1) for v in line]
+    if cfg["direction"] not in ("positive", "negative", "both"):
+        raise ProjectError("Direction must be positive, negative or both.")
+    if cfg["roi"] is not None and len(cfg["roi"]) != 4:
+        raise ProjectError("The ROI needs four numbers: x1, y1, x2, y2.")
+    cal = cfg["calibration"]
+    if cal is not None:
+        if len(cal.get("image_points", [])) != 4 or float(cal.get("width_cm", 0)) <= 0 or float(cal.get("length_cm", 0)) <= 0:
+            raise ProjectError("Calibration needs four points and two positive real distances in cm.")
+    for key in ("hysteresis_px", "edge_margin_px", "classify_timeout_s"):
+        cfg[key] = float(cfg[key])
+        if cfg[key] < 0:
+            raise ProjectError(f"{key} cannot be negative.")
+    cfg["k_crops"] = int(cfg["k_crops"])
+    if cfg["k_crops"] < 1:
+        raise ProjectError("k_crops must be at least 1.")
+    meta["counting"] = cfg
+    save_project(meta)
+    activity.log(project_dir(slug), "counting.setup", "حُدّثت إعدادات العدّ (خط العدّ والاتجاه).",
+                 "Counting setup updated (line and direction).",
+                 why_ar="خط العدّ هو المكان الذي يُحسب عنده الرغيف مرة واحدة عند عبوره.",
+                 why_en="The counting line is where each object is counted once, as it crosses.",
+                 outputs={k: cfg[k] for k in ("line", "direction", "angle_id")})
+    return cfg

@@ -93,7 +93,7 @@ async function home() {
 
 // ---------------------------------------------------------------- project
 
-const TABS = { sources: "المصادر", data: "البيانات", classes: "الأنواع", log: "ماذا حدث؟" };
+const TABS = { sources: "المصادر", data: "البيانات", classes: "الأنواع", counting: "خط العدّ", truth: "المسطرة", harness: "القياس", log: "ماذا حدث؟" };
 
 async function project(slug, tab = "sources") {
   const p = await api("/projects/" + slug);
@@ -128,7 +128,8 @@ async function project(slug, tab = "sources") {
       }) }, "حذف")),
     body);
   const reload = () => project(slug, tab);
-  await ({ sources: sourcesTab, data: dataTab, classes: classesTab, log: logTab }[tab] || sourcesTab)(slug, p, body, reload);
+  const tabs = { sources: sourcesTab, data: dataTab, classes: classesTab, counting: countingTab, truth: truthTab, harness: harnessTab, log: logTab };
+  await (tabs[tab] || sourcesTab)(slug, p, body, reload);
 }
 
 async function sourcesTab(slug, p, body, reload) {
@@ -277,6 +278,306 @@ async function logTab(slug, p, body) {
         Object.entries(e.numbers).map(([k, v]) => `${k}: ${v}`).join(" · ")) : null)))));
 }
 
+
+// ---------------------------------------------------------------- counting line
+
+const SVGNS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs = {}) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+// Arrow from the middle of the line toward the side where objects are counted.
+function drawLine(layer, line, direction, w, h) {
+  mount(layer);
+  layer.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  if (!line) return;
+  const [x1, y1, x2, y2] = line;
+  const stroke = Math.max(2, w / 300);
+  layer.append(svg("line", { x1, y1, x2, y2, stroke: "#f59e0b", "stroke-width": stroke * 1.5 }));
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2, len = Math.hypot(x2 - x1, y2 - y1) || 1;
+  // "after" side = positive signed distance: normal (dy, -dx) in image coordinates.
+  const nx = (y2 - y1) / len, ny = -(x2 - x1) / len, a = Math.min(w, h) / 8;
+  const arrow = (sx) => {
+    const ex = mx + sx * nx * a, ey = my + sx * ny * a;
+    layer.append(svg("line", { x1: mx, y1: my, x2: ex, y2: ey, stroke: "#0f766e", "stroke-width": stroke * 1.5 }));
+    layer.append(svg("circle", { cx: ex, cy: ey, r: stroke * 3, fill: "#0f766e" }));
+  };
+  if (direction === "both") { arrow(1); arrow(-1); } else arrow(direction === "negative" ? -1 : 1);
+}
+
+async function countingTab(slug, p, body, reload) {
+  const data = await api(`/projects/${slug}/counting`);
+  const cfg = data.config;
+  let line = cfg.line, pending = null;
+  if (!data.angles.length) {
+    mount(body, explain("أضف فيديو أولًا (تبويب البيانات). أول فيديو لكل زاوية كاميرا يحفظ صورة مرجعية نرسم عليها خط العدّ."));
+    return;
+  }
+  const angle = data.angles.find((a) => a.angle_id === cfg.angle_id) || data.angles[0];
+  const img = h("img", { src: `/api/projects/${slug}/file/${angle.reference}`, style: "width:100%;display:block;border-radius:8px" });
+  const layer = svg("svg", { style: "position:absolute;inset:0;width:100%;height:100%;pointer-events:none" });
+  const direction = h("select", {}, h("option", { value: "positive" }, "في اتجاه السهم فقط"), h("option", { value: "both" }, "في الاتجاهين"));
+  direction.value = cfg.direction === "both" ? "both" : "positive";
+  const hyst = h("input", { type: "number", value: cfg.hysteresis_px, min: 0, step: 1, style: "max-width:100px" });
+  const redraw = () => drawLine(layer, line, direction.value, angle.width, angle.height);
+  direction.onchange = redraw;
+  const stage = h("div", { style: "position:relative;cursor:crosshair;user-select:none" }, img, layer);
+  stage.addEventListener("click", (ev) => {
+    const r = img.getBoundingClientRect();
+    const x = Math.round((ev.clientX - r.left) * angle.width / r.width), y = Math.round((ev.clientY - r.top) * angle.height / r.height);
+    if (!pending) { pending = [x, y]; line = null; mount(layer); layer.append(svg("circle", { cx: x, cy: y, r: angle.width / 150, fill: "#f59e0b" })); }
+    else { line = [...pending, x, y]; pending = null; redraw(); }
+  });
+  img.onload = redraw;
+  mount(body,
+    explain("اضغط نقطتين على الصورة لرسم خط العدّ عبر السير. كل رغيف يُعدّ مرة واحدة عند عبوره الخط في اتجاه السهم.",
+      "ضع الخط في منطقة يكون فيها الرغيف كاملًا ومنفصلًا عن غيره، مع مسافة كافية قبله لجمع صور الرغيف للتصنيف.",
+      "إذا كان السهم عكس حركة السير اضغط «اعكس الاتجاه»."),
+    h("div", { class: "card" },
+      h("div", { class: "row" },
+        field("زاوية الكاميرا", h("select", { disabled: data.angles.length < 2 }, data.angles.map((a) => h("option", { value: a.angle_id }, `${a.angle_id} (${a.width}×${a.height})`)))),
+        field("العدّ", direction), field("هامش بعد الخط (بكسل)", hyst),
+        h("button", { onclick: () => { if (line) { line = [line[2], line[3], line[0], line[1]]; redraw(); } } }, "اعكس الاتجاه"),
+        h("button", { class: "primary", onclick: act(async () => {
+          if (!line) return toast("ارسم الخط أولًا بنقطتين", true);
+          await api(`/projects/${slug}/counting`, { method: "PUT", json: { line, direction: direction.value, angle_id: angle.angle_id, hysteresis_px: Number(hyst.value) } });
+          toast("حُفظ خط العدّ");
+        }) }, "حفظ")),
+      h("div", { style: "margin-top:12px" }, stage)));
+}
+
+// ---------------------------------------------------------------- truth
+
+const STATUS_AR = { needs_count_1: "يحتاج العدّة الأولى", needs_count_2: "يحتاج العدّة الثانية", needs_reconcile: "يحتاج مطابقة العدّتين", final: "نهائي", locked: "نهائي ومقفول" };
+
+function fmtTime(s) { const m = Math.floor(s / 60); return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`; }
+function parseTime(v) { v = String(v).trim(); if (v.includes(":")) { const [m, s] = v.split(":"); return Number(m) * 60 + Number(s); } return Number(v); }
+
+async function truthTab(slug, p, body, reload) {
+  const [data, videos] = await Promise.all([api(`/projects/${slug}/truth`), api(`/projects/${slug}/media?kind=video`)]);
+  const media = h("select", {}, videos.map((v) => h("option", { value: v.id }, `#${v.id} ${v.origin_name} (${((v.duration_s || 0) / 60).toFixed(1)} د)`)));
+  const start = h("input", { dir: "ltr", value: "0:00", style: "max-width:110px" });
+  const end = h("input", { dir: "ltr", value: "3:00", style: "max-width:110px" });
+  const cond = h("select", {}, Object.entries(data.conditions).map(([k, v]) => h("option", { value: k }, v)));
+  const note = h("input", { placeholder: "اختياري" });
+  const perCond = {};
+  for (const c of data.clips) if (c.final_taps) perCond[c.condition] = (perCond[c.condition] || 0) + c.final_taps.length;
+
+  mount(body,
+    explain("المسطرة هي عدّ بشري لمقاطع قصيرة، وهي المقياس الوحيد لأي موديل. اختر مقاطع من ظروف مختلفة: زحمة، تراكم، أيدي، ليل، سير فاضي.",
+      "كل مقطع يُعدّ مرتين (شخصان، أو نفس الشخص في يومين). البرنامج يطابق العدّتين ويعرض لك الاختلافات لتحسمها.",
+      `الحكم على أي حالة يحتاج ${data.min_per_condition} عبور على الأقل فيها، لأن فرق رغيفين في عدد صغير ضوضاء.`,
+      "هذه الأجزاء من الفيديو لن تُستخدم في التدريب أبدًا."),
+    videos.length ? h("div", { class: "card" }, h("h2", {}, "مقطع مسطرة جديد"),
+      h("div", { class: "row" }, field("الفيديو", media), field("من (د:ث)", start), field("إلى (د:ث)", end), field("الحالة", cond), field("ملاحظة", note),
+        h("button", { class: "primary", onclick: act(async () => {
+          await api(`/projects/${slug}/truth`, { method: "POST", json: { media_id: Number(media.value), start_s: parseTime(start.value), end_s: parseTime(end.value), condition: cond.value, note: note.value } });
+          reload();
+        }) }, "إنشاء")))
+      : explain("أضف فيديو أولًا من تبويب البيانات."),
+    Object.keys(data.conditions).some((c) => perCond[c]) ? h("div", { class: "card" }, h("h2", {}, "ما جُمع حتى الآن (عبور نهائي لكل حالة)"),
+      h("div", { class: "stats" }, Object.entries(data.conditions).filter(([k]) => perCond[k]).map(([k, v]) =>
+        h("span", {}, v, " ", h("b", { class: perCond[k] >= data.min_per_condition ? "ok" : "" }, perCond[k]), ` / ${data.min_per_condition}`)))) : null,
+    h("div", { class: "card" }, data.clips.length ? h("table", {},
+      h("tr", {}, ["#", "الفيديو", "الوقت", "الحالة", "العدّات", "المسطرة", "الوضع", ""].map((t) => h("th", {}, t))),
+      data.clips.map((c) => h("tr", {},
+        h("td", { class: "num" }, c.id), h("td", { dir: "ltr" }, c.media.origin_name),
+        h("td", { class: "num" }, `${fmtTime(c.start_s)}–${fmtTime(c.end_s)}`), h("td", {}, data.conditions[c.condition] || c.condition),
+        h("td", {}, c.counts.map((n) => `${n.counter}: ${n.n}${n.finished ? "" : " (لم تنتهِ)"}`).join("، ") || "—"),
+        h("td", { class: "num" }, c.final_taps ? c.final_taps.length : "—"),
+        h("td", {}, STATUS_AR[c.status] || c.status),
+        h("td", {}, h("div", { class: "row" },
+          c.final_taps ? null : h("button", { class: "primary", onclick: act(async () => {
+            const open = c.counts.find((n) => !n.finished && n.counter === META.user);
+            const cnt = open || await api(`/projects/${slug}/truth/${c.id}/counts`, { method: "POST" });
+            location.hash = `#/p/${slug}/truth/${c.id}/count/${cnt.id}`;
+          }) }, c.counts.some((n) => !n.finished) ? "أكمل العدّ" : "عُدّ"),
+          c.counts.filter((n) => n.finished).length >= 2 || c.final_taps ? h("button", { onclick: () => (location.hash = `#/p/${slug}/truth/${c.id}`) }, c.final_taps ? "عرض" : "طابق العدّتين") : null,
+          c.locked ? null : h("button", { class: "danger", onclick: act(async () => {
+            if (confirm("حذف مقطع المسطرة وعدّاته؟")) { await api(`/projects/${slug}/truth/${c.id}`, { method: "DELETE" }); reload(); }
+          }) }, "حذف"))))))
+      : h("p", { class: "muted" }, "لا توجد مقاطع مسطرة بعد.")));
+}
+
+async function countPage(slug, clipId, countId) {
+  const p = await api("/projects/" + slug);
+  let clip = await api(`/projects/${slug}/truth/${clipId}`);
+  const count = clip.counts.find((c) => c.id === countId);
+  if (!count) throw new Error("العدّة غير موجودة");
+  const counting = (await api(`/projects/${slug}/counting`)).config;
+  const classes = p.classes.length ? p.classes : [{ id: "unknown", display_name: "رغيف / عنصر", colour: "#2563eb" }];
+  let taps = count.taps.slice(), current = classes[0].id, stamps = null, dirty = false;
+  const back = h("a", { href: `#/p/${slug}/truth` }, "← المسطرة");
+
+  // Wait for the browser copy of the clip.
+  const holder = h("div", { class: "card" }, "جارٍ تجهيز نسخة المتصفح من المقطع…");
+  mount(view, back, h("h1", {}, `عدّ المقطع #${clipId}`), holder);
+  while (clip.proxy.state === "building") {
+    mount(holder, `جارٍ تجهيز نسخة المتصفح من المقطع… ${Math.round((clip.proxy.progress || 0) * 100)}%`);
+    await new Promise((r) => setTimeout(r, 1500));
+    clip = await api(`/projects/${slug}/truth/${clipId}`);
+  }
+  const ready = clip.proxy.state === "ready";
+  if (ready) stamps = await api(`/projects/${slug}/truth/${clipId}/stamps`);
+  const scale = ready ? clip.proxy.scale : 1;
+  const W = clip.media.width, H = clip.media.height;
+
+  // The player: the WebM copy, or single frames from the server if it could not be made.
+  let player, now, seek, playPause;
+  if (ready) {
+    player = h("video", { src: `/api/projects/${slug}/truth/${clipId}/proxy.webm`, preload: "auto", style: "width:100%;display:block;border-radius:8px", muted: true });
+    now = () => stamps[Math.min(stamps.length - 1, Math.max(0, Math.round(player.currentTime * clip.proxy.fps)))];
+    seek = (d) => (player.currentTime = Math.max(0, player.currentTime + d));
+    playPause = () => (player.paused ? player.play() : player.pause());
+  } else {
+    let t = clip.start_s, timer = null;
+    player = h("img", { style: "width:100%;display:block;border-radius:8px" });
+    const show = () => (player.src = `/api/projects/${slug}/media/${clip.media_id}/frame?t=${t.toFixed(2)}&width=960`);
+    now = () => t;
+    seek = (d) => { t = Math.min(clip.end_s, Math.max(clip.start_s, t + d)); show(); };
+    playPause = () => { if (timer) { clearInterval(timer); timer = null; } else timer = setInterval(() => seek(0.25), 250); };
+    show();
+  }
+  const layer = svg("svg", { style: "position:absolute;inset:0;width:100%;height:100%;pointer-events:none" });
+  drawLine(layer, counting.line, counting.direction, W, H);
+  const stage = h("div", { style: "position:relative;cursor:crosshair" }, player, layer);
+  const list = h("ol", { class: "timeline", style: "max-height:420px;overflow:auto" });
+  const counter = h("b", {}, "0");
+  const clsButtons = h("div", { class: "row" });
+  const status = h("span", { class: "muted" });
+
+  const renderTaps = () => {
+    mount(counter, String(taps.length));
+    for (const n of layer.querySelectorAll(".tap")) n.remove();
+    const t = now();
+    for (const tap of taps) if (tap.x != null && Math.abs(tap.t - t) < 0.6)
+      layer.append(svg("circle", { class: "tap", cx: tap.x, cy: tap.y, r: W / 60, fill: "none", stroke: "#db2777", "stroke-width": W / 400 }));
+    mount(list, taps.slice().reverse().slice(0, 200).map((tap) => h("li", {}, h("span", { class: "num" }, fmtTime(tap.t)), " · ",
+      (classes.find((c) => c.id === tap.class_id) || { display_name: tap.class_id }).display_name)));
+  };
+  const renderClasses = () => mount(clsButtons, classes.map((c, i) => h("button", { class: c.id === current ? "primary" : "", onclick: () => { current = c.id; renderClasses(); } },
+    `${i + 1} · ${c.display_name}`)));
+  const save = async (finished = false) => {
+    await api(`/projects/${slug}/truth-counts/${countId}`, { method: "PUT", json: { taps, finished } });
+    dirty = false; mount(status, "حُفظ " + new Date().toLocaleTimeString("ar-EG"));
+  };
+  const autosave = setInterval(() => { if (dirty) save().catch((e) => toast(e.message, true)); }, 5000);
+  window.addEventListener("hashchange", () => clearInterval(autosave), { once: true });
+
+  stage.addEventListener("click", (ev) => {
+    const r = player.getBoundingClientRect();
+    const x = Math.round((ev.clientX - r.left) * W / r.width), y = Math.round((ev.clientY - r.top) * H / r.height);
+    taps.push({ t: now(), class_id: current, x, y }); taps.sort((a, b) => a.t - b.t); dirty = true; renderTaps();
+  });
+  const onKey = (ev) => {
+    if (!document.body.contains(stage)) return document.removeEventListener("keydown", onKey);
+    if (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT") return;
+    if (ev.code === "Space") { ev.preventDefault(); playPause(); }
+    else if (ev.key === "ArrowRight") seek(-1);   // RTL page: right arrow goes back in time
+    else if (ev.key === "ArrowLeft") seek(1);
+    else if (ev.key === "z" || ev.key === "Z" || ev.key === "ي") { if (taps.length) { const t = now(); let k = 0; taps.forEach((tap, i) => { if (Math.abs(tap.t - t) < Math.abs(taps[k].t - t)) k = i; }); taps.splice(k, 1); dirty = true; renderTaps(); } }
+    else if (/^[1-9]$/.test(ev.key) && classes[+ev.key - 1]) { current = classes[+ev.key - 1].id; renderClasses(); }
+  };
+  document.addEventListener("keydown", onKey);
+  if (ready) { player.addEventListener("timeupdate", renderTaps); player.addEventListener("seeked", renderTaps); }
+  else player.addEventListener("load", renderTaps);
+  const speed = h("select", { onchange: () => { if (ready) player.playbackRate = Number(speed.value); } },
+    [0.25, 0.5, 0.75, 1].map((v) => h("option", { value: v, selected: v === 0.5 }, `×${v}`)));
+  if (ready) player.playbackRate = 0.5;
+
+  renderClasses(); renderTaps();
+  mount(view, back,
+    h("h1", {}, `عدّ المقطع #${clipId}`),
+    h("div", { class: "muted" }, `${clip.media.origin_name} · ${fmtTime(clip.start_s)}–${fmtTime(clip.end_s)} · العادّ: ${count.counter}`),
+    explain("شغّل المقطع، وكلما عبر رغيف خط العدّ اضغط عليه بالماوس. الضغط على الرغيف نفسه يسجّل مكانه، وهذا يفرّق بين العدّ المزدوج والرغيف الفائت عند التراكم.",
+      "اختر النوع قبل الضغط بالأزرار أو بالأرقام 1–9. المسافة: تشغيل/إيقاف. الأسهم: ثانية للأمام أو للخلف. حرف Z: يحذف أقرب ضغطة للحظة الحالية.",
+      "السرعة البطيئة (×0.5) أدق. الحفظ تلقائي كل 5 ثوانٍ، واضغط «انتهيت» في الآخر.",
+      ready ? "" : "تعذّر تجهيز نسخة فيديو للمتصفح، فيُعرض المقطع صورة بصورة."),
+    h("div", { style: "display:grid;grid-template-columns:minmax(0,3fr) minmax(220px,1fr);gap:16px;align-items:start" },
+      h("div", { class: "card" }, stage,
+        h("div", { class: "row", style: "margin-top:10px" },
+          h("button", { onclick: playPause }, "تشغيل / إيقاف"), h("button", { onclick: () => seek(-2) }, "−2 ث"), h("button", { onclick: () => seek(2) }, "+2 ث"),
+          h("label", { style: "flex:0 0 auto" }, "السرعة", speed)),
+        h("div", { style: "margin-top:10px" }, clsButtons)),
+      h("div", { class: "card" }, h("h2", {}, "العبور: ", counter), status,
+        h("div", { class: "row", style: "margin:10px 0" },
+          h("button", { onclick: act(() => save(false)) }, "حفظ"),
+          h("button", { class: "primary", onclick: act(async () => {
+            if (!confirm(`إنهاء العدّة بـ ${taps.length} عبور؟ لن يمكن تعديلها بعد ذلك.`)) return;
+            await save(true); location.hash = `#/p/${slug}/truth`;
+          }) }, "انتهيت")),
+        list)));
+}
+
+async function reconcilePage(slug, clipId) {
+  const p = await api("/projects/" + slug);
+  const clip = await api(`/projects/${slug}/truth/${clipId}`);
+  const names = Object.fromEntries(p.classes.map((c) => [c.id, c.display_name])); names.unknown = "غير محدد";
+  const back = h("a", { href: `#/p/${slug}/truth` }, "← المسطرة");
+  if (clip.final_taps) {
+    mount(view, back, h("h1", {}, `المقطع #${clipId}: ${clip.final_taps.length} عبور نهائي`),
+      h("div", { class: "card" }, h("p", {}, clip.locked ? "المسطرة مقفولة ولن تتغير." : "المسطرة نهائية. اقفلها حتى لا تتغير بعد الآن."),
+        clip.locked ? null : h("button", { class: "primary", onclick: act(async () => { await api(`/projects/${slug}/truth/${clipId}/lock`, { method: "POST" }); reconcilePage(slug, clipId); }) }, "اقفل المسطرة")));
+    return;
+  }
+  const rec = await api(`/projects/${slug}/truth/${clipId}/reconcile`);
+  const keepA = new Set(), keepB = new Set(), cls = {};
+  const thumb = (t, x, y) => h("img", { src: `/api/projects/${slug}/media/${clip.media_id}/frame?t=${t}&width=480` + (x != null ? `&mark_x=${x}&mark_y=${y}` : ""), style: "width:320px;border-radius:6px;display:block" });
+  const item = (tap, set, who) => h("div", { class: "card", style: "display:flex;gap:12px;align-items:center" }, thumb(tap.t, tap.x, tap.y),
+    h("div", {}, h("div", {}, `${fmtTime(tap.t)} · ${names[tap.class_id] || tap.class_id}`), h("div", { class: "muted" }, `عدّه ${who} فقط`),
+      h("label", { style: "flex-direction:row;display:flex;gap:6px;align-items:center" },
+        h("input", { type: "checkbox", style: "width:auto", onchange: (ev) => (ev.target.checked ? set.add(tap.index) : set.delete(tap.index)) }), "عبور حقيقي، أبقِه")));
+  mount(view, back, h("h1", {}, `مطابقة عدّتي المقطع #${clipId}`),
+    explain(`العدّة الأولى (${rec.count_a.counter}): ${rec.count_a.n} · الثانية (${rec.count_b.counter}): ${rec.count_b.n} · اتفقتا على ${rec.pairs}.`,
+      rec.status === "agreed" ? "العدّتان متفقتان تمامًا." : "راجع كل اختلاف: الصورة من لحظة الضغط. ما لا تُبقيه يُحذف من المسطرة."),
+    rec.only_in_a.length ? h("h2", {}, "في العدّة الأولى فقط") : null, rec.only_in_a.map((t) => item(t, keepA, rec.count_a.counter)),
+    rec.only_in_b.length ? h("h2", {}, "في العدّة الثانية فقط") : null, rec.only_in_b.map((t) => item(t, keepB, rec.count_b.counter)),
+    rec.class_conflicts.length ? h("h2", {}, "نفس العبور بنوعين مختلفين") : null,
+    rec.class_conflicts.map((c) => h("div", { class: "card", style: "display:flex;gap:12px;align-items:center" }, thumb(c.t),
+      h("div", {}, h("div", {}, fmtTime(c.t)), h("select", { onchange: (ev) => (cls[c.a] = ev.target.value) },
+        h("option", { value: "" }, "اختر النوع"), [c.class_a, c.class_b].map((k) => h("option", { value: k }, names[k] || k)))))),
+    h("div", { class: "card" }, h("button", { class: "primary", onclick: act(async () => {
+      await api(`/projects/${slug}/truth/${clipId}/resolve`, { method: "POST", json: { decisions: { keep_a: [...keepA], keep_b: [...keepB], class: cls } } });
+      reconcilePage(slug, clipId);
+    }) }, "اعتمد المسطرة النهائية")));
+}
+
+// ---------------------------------------------------------------- harness
+
+async function harnessTab(slug, p, body, reload) {
+  const reports = await api(`/projects/${slug}/reports`);
+  const model = h("input", { dir: "ltr", placeholder: "/home/me/models/bread_r2.onnx أو C:\\models\\bread_r2.onnx" });
+  const fps = h("input", { dir: "ltr", value: "3, 5, 10, 20", style: "max-width:160px" });
+  const tracker = h("select", {}, h("option", { value: "bytetrack" }, "ByteTrack (الجديد)"), h("option", { value: "greedy" }, "Greedy (القديم، للمقارنة)"));
+  const latency = h("input", { type: "number", value: 0, min: 0, step: 10, style: "max-width:110px" });
+  const out = h("div");
+  mount(body,
+    explain("القياس يشغّل الموديل على كل مقاطع المسطرة النهائية، بنفس كود العدّ الذي يعمل في المخبز، ويطابق كل عدّة مع عدّ الإنسان.",
+      "جرّب أكثر من سرعة معالجة (صورة/ث) لتعرف ما يحتاجه جهاز المخبز. «زمن الجهاز» يحاكي جهازًا أبطأ: الصور التي تصل وهو مشغول تُفقد كما في البث الحي.",
+      "النتيجة: الفائت والزائد منفصلان لكل حالة، مع تقرير فيه صور حقيقية من الأخطاء."),
+    h("div", { class: "card" }, h("div", { class: "row" },
+      field("ملف الموديل (.onnx) على هذا الجهاز", model), field("سرعات المعالجة", fps), field("المتتبّع", tracker), field("زمن الجهاز لكل صورة (ms)", latency),
+      h("button", { class: "primary", onclick: act(async () => {
+        mount(out, h("p", {}, "جارٍ القياس… قد يستغرق دقائق."));
+        const r = await api(`/projects/${slug}/harness`, { method: "POST", json: {
+          model_path: model.value.trim(), fps_list: fps.value.split(/[,،\s]+/).filter(Boolean).map(Number), tracker: tracker.value, latency_s: Number(latency.value) / 1000 } });
+        mount(out, h("table", {}, h("tr", {}, ["صورة/ث", "المسطرة", "النظام", "فائت", "زائد", "دقة النوع"].map((t) => h("th", {}, t))),
+          r.runs.map((x) => h("tr", {}, h("td", { class: "num" }, x.fps), h("td", { class: "num" }, x.overall.truth), h("td", { class: "num" }, x.overall.events),
+            h("td", { class: "num" }, `${x.overall.misses} (${(100 * x.overall.miss_rate).toFixed(1)}%)`),
+            h("td", { class: "num" }, `${x.overall.extras} (${(100 * x.overall.extra_rate).toFixed(1)}%)`),
+            h("td", { class: "num" }, x.overall.type_accuracy == null ? "—" : (100 * x.overall.type_accuracy).toFixed(1) + "%")))),
+          h("p", {}, h("a", { href: `/api/projects/${slug}/reports/${r.report_dir.split("/").pop()}/report.html`, target: "_blank" }, "افتح التقرير الكامل")));
+      }) }, "قِس")), out),
+    h("div", { class: "card" }, h("h2", {}, "تقارير سابقة"), reports.length ? h("table", {},
+      h("tr", {}, ["الوقت", "الموديل", "المتتبّع", "صورة/ث", "المسطرة", "فائت", "زائد", ""].map((t) => h("th", {}, t))),
+      reports.map((r) => h("tr", {}, h("td", {}, when(r.created_at)), h("td", { dir: "ltr" }, r.model_sha || "—"), h("td", {}, r.tracker),
+        h("td", { class: "num" }, (r.fps || []).join("، ")), h("td", { class: "num" }, r.truth), h("td", { class: "num" }, r.misses), h("td", { class: "num" }, r.extras),
+        h("td", {}, h("a", { href: `/api/projects/${slug}/reports/${r.name}/report.html`, target: "_blank" }, "التقرير")))))
+      : h("p", { class: "muted" }, "لا توجد تقارير بعد.")));
+}
+
 // ---------------------------------------------------------------- router
 
 async function route() {
@@ -284,7 +585,9 @@ async function route() {
     META = META || await api("/meta");
     document.getElementById("workspace").textContent = "مكان الحفظ: " + META.workspace;
     const parts = location.hash.replace(/^#\//, "").split("/").filter(Boolean);
-    if (parts[0] === "p" && parts[1]) await project(parts[1], parts[2]);
+    if (parts[0] === "p" && parts[1] && parts[2] === "truth" && parts[3] && parts[4] === "count") await countPage(parts[1], +parts[3], +parts[5]);
+    else if (parts[0] === "p" && parts[1] && parts[2] === "truth" && parts[3]) await reconcilePage(parts[1], +parts[3]);
+    else if (parts[0] === "p" && parts[1]) await project(parts[1], parts[2]);
     else await home();
   } catch (e) { mount(view, h("div", { class: "card bad" }, e.message)); }
 }

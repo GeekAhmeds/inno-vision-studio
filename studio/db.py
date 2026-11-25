@@ -40,14 +40,44 @@ CREATE TABLE IF NOT EXISTS labels (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS labels_media ON labels(media_id);
+
+-- Truth: short clips counted by humans; the only scoreboard (prompt §6 module 8).
+CREATE TABLE IF NOT EXISTS truth_clips (
+    id          INTEGER PRIMARY KEY,
+    media_id    INTEGER NOT NULL REFERENCES media(id),
+    start_s     REAL NOT NULL,
+    end_s       REAL NOT NULL,
+    condition   TEXT NOT NULL,
+    note        TEXT,
+    created_at  TEXT NOT NULL,
+    final_taps  TEXT,            -- JSON list after reconciliation; NULL until then
+    final_by    TEXT,
+    locked      INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS truth_counts (
+    id          INTEGER PRIMARY KEY,
+    clip_id     INTEGER NOT NULL REFERENCES truth_clips(id) ON DELETE CASCADE,
+    counter     TEXT NOT NULL,   -- who counted
+    finished    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    taps        TEXT NOT NULL DEFAULT '[]'   -- JSON [{t, class_id, x, y}]
+);
 """
+
+
+_ready: set[str] = set()
 
 
 @contextmanager
 def connect(project_dir: Path) -> Iterator[sqlite3.Connection]:
-    con = sqlite3.connect(project_dir / DB_FILE)
+    path = project_dir / DB_FILE
+    con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
+    key = str(path.resolve())
+    if key not in _ready:  # bring older project databases up to the current schema
+        con.executescript(SCHEMA)
+        _ready.add(key)
     try:
         yield con
         con.commit()
@@ -58,3 +88,9 @@ def connect(project_dir: Path) -> Iterator[sqlite3.Connection]:
 def init(project_dir: Path) -> None:
     with connect(project_dir) as con:
         con.executescript(SCHEMA)
+    _ready.add(str((project_dir / DB_FILE).resolve()))
+
+
+def forget(project_dir: Path) -> None:
+    """Call when a project folder is deleted or replaced, so its schema is checked again."""
+    _ready.discard(str((project_dir / DB_FILE).resolve()))

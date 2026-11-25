@@ -1,9 +1,17 @@
 [project]
 name = "inno-count"
-version = "0.0.1"
+version = "0.1.0"
 description = "Shared counting core: imported by the ERP Hardware Agent and by the studio harness. Permissive dependencies only."
 requires-python = ">=3.11"
-dependencies = []
+# Every dependency here ships to client machines: BSD / MIT / Apache only (prompt rule 9).
+dependencies = [
+    "numpy>=1.26",          # BSD-3
+    "scipy>=1.11",          # BSD-3
+    "opencv-python-headless>=4.9",  # Apache-2.0
+]
+
+[project.optional-dependencies]
+onnx = ["onnxruntime>=1.17"]  # MIT
 
 [build-system]
 requires = ["hatchling"]

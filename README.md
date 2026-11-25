@@ -33,8 +33,8 @@ CI runs the same tests on Ubuntu and Windows.
 ## Layout
 
 ```
-packages/inno_count/   shared counting core (placeholder until phase P1)
-studio/                backend: projects, sources, ingest, explain, api, cli
+packages/inno_count/   shared counting core: tracker, line counter, camera check, ONNX detector, simulator
+studio/                backend: projects, sources, ingest, truth, harness, explain, api, cli
 web/                   UI served by the backend (plain JS for now, no build step)
 docs/                  specification, user guide, status
 tests/

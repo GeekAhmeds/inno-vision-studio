@@ -7,12 +7,14 @@ from .store import (
     delete_project,
     duplicate_project,
     export_project,
+    get_counting,
     get_project,
     import_project,
     list_projects,
     project_dir,
     rename_project,
     save_project,
+    set_counting,
 )
 
 __all__ = [
@@ -24,10 +26,12 @@ __all__ = [
     "delete_project",
     "duplicate_project",
     "export_project",
+    "get_counting",
     "get_project",
     "import_project",
     "list_projects",
     "project_dir",
     "rename_project",
     "save_project",
+    "set_counting",
 ]

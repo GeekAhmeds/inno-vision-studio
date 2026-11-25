@@ -41,6 +41,9 @@ def _url_with_password(url: str, password: str | None, style: str = "raw") -> st
     FFmpeg's RTSP client does not decode %-escapes in the login, so a password like "Admin@123"
     must go in as is ("raw"); FFmpeg takes the LAST "@" before the host. Only a password containing
     "/", "?" or "#" cannot be written raw; then the escaped form is tried."""
+    if "{" in url:
+        parts = urlsplit(url)
+        url = rtsp.fill(url, unquote(parts.username) if parts.username else None, password)
     if not password:
         return url
     parts = urlsplit(url)
@@ -131,10 +134,10 @@ def test_connection(slug: str, source_id: str, frames: int = 20) -> dict[str, An
                         f"The camera refused user “{user}” or the password (401). Check them in the camera or NVR settings. "
                         "Some cameras lock the account for a while after several wrong tries.")
         if answer is not None and answer.status == 404:
-            return fail("الكاميرا قبلت الدخول لكن مسار البث غير موجود (404). أمثلة: Hikvision ‎/Streaming/Channels/101، "
-                        "Dahua ‎/cam/realmonitor?channel=1&subtype=0.",
-                        "Login accepted but the stream path does not exist (404). Examples: Hikvision /Streaming/Channels/101, "
-                        "Dahua /cam/realmonitor?channel=1&subtype=0.")
+            return fail("الكاميرا قبلت الدخول لكن مسار البث غير موجود (404). اضغط «ابحث عن مسار البث» ليجرّب البرنامج "
+                        "المسارات المعروفة للماركات المشهورة.",
+                        "Login accepted but the stream path does not exist (404). Press “Find the stream path” to try the "
+                        "known paths of common makers.")
         if answer is not None and answer.status >= 400:
             return fail(f"الكاميرا ردّت بخطأ {answer.status} ({answer.reason}).",
                         f"The camera answered {answer.status} ({answer.reason}).")
@@ -246,3 +249,33 @@ def record(slug: str, source_id: str, seconds: float, max_frames: int | None = N
                  outputs={"clip": out_path.relative_to(folder).as_posix()},
                  numbers={"frames": len(stamps), "seconds": stamps[-1]})
     return out_path
+
+
+def find_stream_paths(slug: str, source_id: str) -> dict[str, Any]:
+    source = get_source(slug, source_id)
+    url = source["params"]["url"]
+    if source["kind"] not in ("ip", "nvr") or not url.startswith("rtsp://"):
+        raise SourceError("Path search works for RTSP cameras only.")
+    if not _reachable(url):
+        raise SourceError("Camera unreachable. Check the address and the network first.")
+    password = secrets.get_password(slug, source_id)
+    user, _ = rtsp.credentials(url, password)
+    found = rtsp.find_paths(url, user, password)
+    activity.log(project_dir(slug), "source.find_path",
+                 f"جُرّب {len(rtsp.COMMON_PATHS)} مسار معروف على «{source['name']}»: يعمل منها {len(found)}.",
+                 f"{len(rtsp.COMMON_PATHS)} known paths tried on “{source['name']}”: {len(found)} work.",
+                 outputs={"paths": [f["path"] for f in found]})
+    return {"tried": len(rtsp.COMMON_PATHS), "found": found}
+
+
+def use_stream_path(slug: str, source_id: str, url_path: str) -> dict[str, Any]:
+    """Keep host, port and user; replace the path (and query)."""
+    from .store import update_login
+
+    source = get_source(slug, source_id)
+    p = urlsplit(source["params"]["url"])
+    path, _, query = url_path.partition("?")
+    if not path.startswith("/") or "{" in url_path.replace("{password}", ""):
+        raise SourceError("Invalid stream path.")
+    new_url = urlunsplit((p.scheme, p.netloc, path, query, ""))
+    return update_login(slug, source_id, url=new_url)

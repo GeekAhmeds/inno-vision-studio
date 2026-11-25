@@ -101,3 +101,21 @@ def test_update_login_fixes_a_refused_camera(camera, workspace, memory_keyring):
     assert updated["params"]["url"] == f"rtsp://admin@127.0.0.1:{camera}/Streaming/Channels/101"
     assert memory_keyring.get_password("inno-vision-studio", f"{slug}:{src['id']}") == PASSWORD
     assert rtsp.describe(updated["params"]["url"], "admin", PASSWORD).status == 200
+
+
+def test_find_and_use_stream_path(camera, workspace):
+    slug = projects.create_project("Cam3")["slug"]
+    src = sources.add_source(slug, "ip", "cam", url=f"rtsp://admin@127.0.0.1:{camera}/wrong/path", password=PASSWORD)
+    assert "404" in sources.test_connection(slug, src["id"])["error_en"]
+    result = sources.find_stream_paths(slug, src["id"])
+    assert result["tried"] == len(rtsp.COMMON_PATHS)
+    assert [f["url_path"] for f in result["found"]] == ["/Streaming/Channels/101"]
+    updated = sources.use_stream_path(slug, src["id"], "/Streaming/Channels/101")
+    assert updated["params"]["url"] == f"rtsp://admin@127.0.0.1:{camera}/Streaming/Channels/101"
+    assert rtsp.describe(updated["params"]["url"], USER, PASSWORD).status == 200
+
+
+def test_password_in_path_stays_a_placeholder():
+    url = "rtsp://admin@10.0.0.9:554/user=admin&password={password}&channel=1&stream=0.sdp"
+    assert rtsp.fill(url, "admin", "s3cret").endswith("password=s3cret&channel=1&stream=0.sdp")
+    assert "s3cret" in _url_with_password(url, "s3cret") and "{password}" not in _url_with_password(url, "s3cret")

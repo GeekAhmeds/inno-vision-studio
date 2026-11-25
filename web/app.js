@@ -203,6 +203,18 @@ function sourceCard(slug, s, reload) {
         mount(out, h("div", { class: "ok" }, `سُجّل مقطع ${m.width}×${m.height}، ${m.frames} صورة. تجده في تبويب البيانات.`));
       }) }, "تسجيل مقطع"),
       ["ip", "nvr"].includes(s.kind) ? h("button", { onclick: () => { login.hidden = !login.hidden; } }, "تعديل الدخول") : null,
+      (s.params.url || "").startsWith("rtsp://") ? h("button", { onclick: act(async () => {
+        mount(out, "جارٍ تجربة المسارات المعروفة… (حتى دقيقة)");
+        const r = await api(`/projects/${slug}/sources/${s.id}/find-path`, { method: "POST" });
+        mount(out, r.found.length
+          ? h("div", {}, h("p", {}, `جُرّب ${r.tried} مسار، ويعمل منها:`), r.found.map((f) => h("div", { class: "row", style: "align-items:center;margin:4px 0" },
+              h("span", { style: "flex:1" }, f.maker, " — ", h("code", { dir: "ltr" }, f.path)),
+              h("button", { class: "primary", onclick: act(async () => {
+                await api(`/projects/${slug}/sources/${s.id}/use-path`, { method: "POST", json: { url_path: f.url_path } });
+                toast("حُفظ المسار. اضغط «اختبار الاتصال»."); reload();
+              }) }, "استخدم"))))
+          : h("div", { class: "bad" }, `جُرّب ${r.tried} مسار معروف ولم يعمل أي منها. ابحث عن «RTSP URL» لموديل كاميرتك، أو افتح صفحة الكاميرا في المتصفح وانظر إعدادات الشبكة/RTSP.`));
+      }) }, "ابحث عن مسار البث") : null,
       h("button", { class: "danger", onclick: act(async () => {
         if (confirm("حذف هذا المصدر؟ التسجيلات السابقة تبقى.")) { await api(`/projects/${slug}/sources/${s.id}`, { method: "DELETE" }); reload(); }
       }) }, "حذف")),

@@ -68,6 +68,7 @@ def _digest(challenge: str, user: str, password: str, method: str, uri: str) -> 
 
 def describe(url: str, user: str | None, password: str | None, timeout: float = 4.0) -> RtspAnswer:
     """Send DESCRIBE; if the camera asks for a login and we have one, answer it once."""
+    url = fill(url, user, password) if "{" in url else url
     p = urlsplit(url)
     clean = _url_without_userinfo(url)
     with socket.create_connection((p.hostname, p.port or 554), timeout=timeout) as sock:
@@ -89,3 +90,65 @@ def credentials(url: str, password: str | None) -> tuple[str | None, str | None]
     p = urlsplit(url)
     user = unquote(p.username) if p.username else None
     return user, password
+
+
+# Stream paths used by common camera and NVR makers (channel 1). {user}/{password} are filled in
+# for makers that put the login in the path (XMeye-based cameras, common in Egypt).
+COMMON_PATHS: list[tuple[str, str]] = [
+    ("Hikvision / HiLook (main)", "/Streaming/Channels/101"),
+    ("Hikvision / HiLook (sub)", "/Streaming/Channels/102"),
+    ("Hikvision (old)", "/h264/ch1/main/av_stream"),
+    ("Hikvision", "/Streaming/Channels/1"),
+    ("Dahua / Imou / Amcrest (main)", "/cam/realmonitor?channel=1&subtype=0"),
+    ("Dahua / Imou / Amcrest (sub)", "/cam/realmonitor?channel=1&subtype=1"),
+    ("Uniview (main)", "/unicast/c1/s0/live"),
+    ("Uniview", "/media/video1"),
+    ("TP-Link Tapo / VIGI (main)", "/stream1"),
+    ("TP-Link Tapo / VIGI (sub)", "/stream2"),
+    ("Reolink (main)", "/h264Preview_01_main"),
+    ("Reolink (sub)", "/h264Preview_01_sub"),
+    ("Reolink", "/Preview_01_main"),
+    ("XMeye / Xiongmai (main)", "/user={user}&password={password}&channel=1&stream=0.sdp"),
+    ("XMeye / Xiongmai (alt)", "/user={user}_password={password}_channel=1_stream=0.sdp"),
+    ("Axis", "/axis-media/media.amp"),
+    ("ONVIF generic", "/onvif1"),
+    ("Generic", "/live"),
+    ("Generic", "/live/ch0"),
+    ("Generic", "/live/ch00_0"),
+    ("Generic", "/live/main"),
+    ("Generic", "/ch0_0.h264"),
+    ("Generic", "/av0_0"),
+    ("Generic", "/11"),
+    ("Generic", "/12"),
+    ("Generic", "/1"),
+    ("Generic", "/0"),
+    ("Generic", "/h264"),
+    ("Generic", "/video1"),
+    ("Generic", "/stream"),
+    ("Generic", "/"),
+]
+
+
+def fill(url: str, user: str | None, password: str | None) -> str:
+    """Stored URLs keep "{password}" where a maker wants the login in the path, so the password
+    never lands in project files; it is filled in from the keyring only when the camera is opened."""
+    return url.replace("{user}", user or "admin").replace("{password}", password or "")
+
+
+def find_paths(url: str, user: str | None, password: str | None, timeout: float = 3.0) -> list[dict[str, object]]:
+    """Ask the camera for each common path; return the ones it serves (status 200)."""
+    p = urlsplit(url)
+    host = p.netloc.rsplit("@", 1)[-1]
+    found = []
+    for maker, template in COMMON_PATHS:
+        stored = template.replace("{user}", user or "admin")          # "{password}" stays a placeholder
+        path, _, query = stored.partition("?")
+        candidate = fill(urlunsplit((p.scheme, host, path, query, "")), user, password)
+        try:
+            answer = describe(candidate, user, password, timeout)
+        except OSError:
+            continue
+        if answer.status == 200:
+            found.append({"maker": maker, "path": stored.replace("{password}", "******"), "url_path": stored,
+                          "has_login_in_path": "{password}" in template})
+    return found

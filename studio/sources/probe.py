@@ -169,7 +169,20 @@ def test_connection(slug: str, source_id: str, frames: int = 20) -> dict[str, An
                             "Could not open the camera. It may be in use by another program, or unplugged.")
             return fail("تعذّر فتح الفيديو. قد يكون الترميز غير مدعوم.",
                         "Could not open the video. The codec may be unsupported.")
-        started, got, frame = time.monotonic(), 0, None
+        frame = None
+        if kind != "video":
+            # A live stream first hands over what it buffered while connecting, faster than real
+            # time; drain that burst (frames arriving < 15 ms apart) before measuring the rate.
+            warm_until, last = time.monotonic() + 3.0, time.monotonic()
+            while time.monotonic() < warm_until:
+                ok, current = cap.read()
+                if not ok or current is None:
+                    break
+                frame, now = current, time.monotonic()
+                if now - last > 0.015:
+                    break
+                last = now
+        started, got = time.monotonic(), 0
         for _ in range(frames):
             ok, current = cap.read()
             if not ok or current is None:

@@ -339,7 +339,7 @@ function drawLine(layer, line, direction, w, h) {
 async function countingTab(slug, p, body, reload) {
   const data = await api(`/projects/${slug}/counting`);
   const cfg = data.config;
-  let line = cfg.line, pending = null;
+  let line = cfg.line, pending = null, roi = cfg.roi, mode = "line";
   if (!data.angles.length) {
     mount(body, explain("أضف فيديو أولًا (تبويب البيانات). أول فيديو لكل زاوية كاميرا يحفظ صورة مرجعية نرسم عليها خط العدّ."));
     return;
@@ -350,18 +350,34 @@ async function countingTab(slug, p, body, reload) {
   const direction = h("select", {}, h("option", { value: "positive" }, "في اتجاه السهم فقط"), h("option", { value: "both" }, "في الاتجاهين"));
   direction.value = cfg.direction === "both" ? "both" : "positive";
   const hyst = h("input", { type: "number", value: cfg.hysteresis_px, min: 0, step: 1, style: "max-width:100px" });
-  const redraw = () => drawLine(layer, line, direction.value, angle.width, angle.height);
+  const redraw = () => {
+    drawLine(layer, line, direction.value, angle.width, angle.height);
+    if (roi) layer.prepend(svg("rect", { x: roi[0], y: roi[1], width: roi[2] - roi[0], height: roi[3] - roi[1],
+      fill: "rgba(15,118,110,0.12)", stroke: "#0f766e", "stroke-width": Math.max(2, angle.width / 400), "stroke-dasharray": "12 8" }));
+  };
   direction.onchange = redraw;
+  const modeBtn = h("button", { onclick: () => {
+    mode = mode === "roi" ? "line" : "roi"; pending = null;
+    modeBtn.textContent = mode === "roi" ? "اضغط ركنين متقابلين للمنطقة…" : "ارسم منطقة العدّ";
+  } }, "ارسم منطقة العدّ");
   const stage = h("div", { style: "position:relative;cursor:crosshair;user-select:none" }, img, layer);
   stage.addEventListener("click", (ev) => {
     const r = img.getBoundingClientRect();
     const x = Math.round((ev.clientX - r.left) * angle.width / r.width), y = Math.round((ev.clientY - r.top) * angle.height / r.height);
-    if (!pending) { pending = [x, y]; line = null; mount(layer); layer.append(svg("circle", { cx: x, cy: y, r: angle.width / 150, fill: "#f59e0b" })); }
-    else { line = [...pending, x, y]; pending = null; redraw(); }
+    if (!pending) {
+      pending = [x, y];
+      if (mode === "line") line = null; else roi = null;
+      redraw(); layer.append(svg("circle", { cx: x, cy: y, r: angle.width / 150, fill: mode === "line" ? "#f59e0b" : "#0f766e" }));
+    } else if (mode === "line") { line = [...pending, x, y]; pending = null; redraw(); }
+    else {
+      roi = [Math.min(pending[0], x), Math.min(pending[1], y), Math.max(pending[0], x), Math.max(pending[1], y)];
+      pending = null; mode = "line"; modeBtn.textContent = "ارسم منطقة العدّ"; redraw();
+    }
   });
   img.onload = redraw;
   mount(body,
     explain("اضغط نقطتين على الصورة لرسم خط العدّ عبر السير. كل رغيف يُعدّ مرة واحدة عند عبوره الخط في اتجاه السهم.",
+      "«منطقة العدّ» (اختيارية): مستطيل حول السير. أي شيء خارجها يُتجاهل (الأيدي، الرصّة، الأرض)، والرغيف الذي يلمس حافتها يُعتبر مقطوعًا.",
       "ضع الخط في منطقة يكون فيها الرغيف كاملًا ومنفصلًا عن غيره، مع مسافة كافية قبله لجمع صور الرغيف للتصنيف.",
       "إذا كان السهم عكس حركة السير اضغط «اعكس الاتجاه»."),
     h("div", { class: "card" },
@@ -373,9 +389,11 @@ async function countingTab(slug, p, body, reload) {
         } }, data.angles.map((a) => h("option", { value: a.angle_id, selected: a.angle_id === angle.angle_id }, `${a.angle_id} (${a.width}×${a.height})`)))),
         field("العدّ", direction), field("هامش بعد الخط (بكسل)", hyst),
         h("button", { onclick: () => { if (line) { line = [line[2], line[3], line[0], line[1]]; redraw(); } } }, "اعكس الاتجاه"),
+        modeBtn,
+        h("button", { onclick: () => { roi = null; redraw(); } }, "امسح المنطقة"),
         h("button", { class: "primary", onclick: act(async () => {
           if (!line) return toast("ارسم الخط أولًا بنقطتين", true);
-          await api(`/projects/${slug}/counting`, { method: "PUT", json: { line, direction: direction.value, angle_id: angle.angle_id, hysteresis_px: Number(hyst.value) } });
+          await api(`/projects/${slug}/counting`, { method: "PUT", json: { line, roi, direction: direction.value, angle_id: angle.angle_id, hysteresis_px: Number(hyst.value) } });
           toast("حُفظ خط العدّ");
         }) }, "حفظ")),
       h("div", { style: "margin-top:12px" }, stage)));

@@ -320,3 +320,16 @@ def test_camera_moved_is_flagged_within_a_minute_and_day_night_is_not():
     covered = CameraCheck(ref)
     dark = np.full_like(ref, 12)
     assert covered.measure(dark)[0] is True
+
+
+def test_counting_area_ignores_what_is_outside_it():
+    """A hand or a stack outside the counting area never counts, even if it crosses the line."""
+    clip = make_belt(seed=3, duration_s=30)
+    roi = (0, 0, 320, 360)                       # left half only
+    engine = Engine(SimDetector(clip), ByteTrack(), LineCounter(CounterConfig(clip.line, roi=roi)),
+                    target_fps=10, frame_size=(clip.width, clip.height))
+    events = run(engine, ((round(i / clip.fps, 6), None) for i in range(int(clip.duration_s * clip.fps))))
+    got = counts(events)
+    truth_left = [t for t, _, x in clip.crossings() if x < 320]
+    assert got and all(e.x <= 320 for e in got)
+    assert abs(len(got) - len(truth_left)) <= 1

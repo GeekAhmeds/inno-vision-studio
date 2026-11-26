@@ -27,7 +27,7 @@ from inno_count.engine import Engine, frame_at, read_video
 from inno_count.geometry import Line, PlaneCalibration
 from inno_count.geometry import Area
 from inno_count.legacy import GreedyCentroidTracker
-from inno_count.types import ClassificationEvent, CountEvent
+from inno_count.types import ClassificationEvent, CountEvent, EntryEvent
 
 from .. import db
 from ..explain import activity
@@ -77,7 +77,13 @@ def build_engine(slug: str, detector: Any, tracker: str = "bytetrack", fps: floa
         area=Area(counting["area"]) if counting.get("area") else None, edge_margin_px=counting["edge_margin_px"],
         k_crops=counting["k_crops"], classify_timeout_s=counting["classify_timeout_s"], calibration=cal,
         class_names=class_names, source_id=slug, model_sha=model_sha)
-    return Engine(detector, TRACKERS[tracker](), LineCounter(cfg), target_fps=fps, simulated_latency_s=latency_s)
+    entry = None
+    if counting.get("entry_line"):
+        entry = LineCounter(CounterConfig(
+            line=Line(*counting["entry_line"]), direction=counting["direction"],
+            hysteresis_px=counting["hysteresis_px"], area=cfg.area, source_id=slug, role="entry"))
+    return Engine(detector, TRACKERS[tracker](), LineCounter(cfg), target_fps=fps, simulated_latency_s=latency_s,
+                  entry_counter=entry)
 
 
 def run_clip(slug: str, clip_id: int, detector: Any, tracker: str = "bytetrack", fps: float | None = 10.0,
@@ -106,6 +112,7 @@ def run_clip(slug: str, clip_id: int, detector: Any, tracker: str = "bytetrack",
     finally:
         engine.detector.detect = original_detect
     counts = [e for e in events if isinstance(e, CountEvent)]
+    entries = [e for e in events if isinstance(e, EntryEvent)] if engine.entry_counter is not None else None
     types = {e.uid: e for e in events if isinstance(e, ClassificationEvent)}
     taps = clip["final_taps"]
     xy = taps and all(t["x"] is not None for t in taps)
@@ -136,6 +143,9 @@ def run_clip(slug: str, clip_id: int, detector: Any, tracker: str = "bytetrack",
         "misses": [taps[i] for i in m.misses],
         "extras": [counts[i].to_dict() for i in m.extras],
         "used_position": bool(xy),
+        # With an entry line: how many entered, and entered minus counted = taken off between the lines.
+        "entries": len(entries) if entries is not None else None,
+        "taken_between": len(entries) - len(counts) if entries is not None else None,
     }
 
 
@@ -153,6 +163,7 @@ def _aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     typed = sum(n for row in confusion.values() for e, n in row.items() if e != "unknown")
     right = sum(row.get(t, 0) for t, row in confusion.items())
     links = [r["link_rate"] for r in results if r["link_rate"] is not None]
+    with_entry = [r for r in results if r.get("entries") is not None]
     return {
         "clips": len(results), "truth": truth, "events": ev, "misses": misses, "extras": extras,
         "miss_rate": round(misses / truth, 4) if truth else 0.0,
@@ -163,6 +174,8 @@ def _aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
         "confusion": confusion,
         "link_rate": round(float(np.mean(links)), 4) if links else None,
         "enough": truth >= MIN_CROSSINGS_PER_CONDITION,
+        "entries": sum(r["entries"] for r in with_entry) if with_entry else None,
+        "taken_between": sum(r["taken_between"] for r in with_entry) if with_entry else None,
     }
 
 
@@ -269,6 +282,12 @@ def render_html(slug: str, report: dict[str, Any]) -> str:
                 f"<td class=n>{_pct(agg['type_accuracy'])}</td><td class=n>{_pct(agg['link_rate'])}</td>"
                 f"<td>{'كافٍ' if agg['enough'] else '<span class=warn>غير كافٍ للحكم</span>'}</td></tr>")
     first = report["runs"][0]
+    entry_html = ""
+    ov = first["overall"]
+    if ov.get("entries") is not None:
+        entry_html = (f"<h2>خط الدخول</h2><p>دخل <b>{ov['entries']}</b> من خط الدخول، واتعدّ <b>{ov['events']}</b> "
+                      f"عند خط العدّ، يعني اتشال بين الخطين حوالي <b>{ov['taken_between']}</b> "
+                      f"(بالإيد أو وقع). الرقم ده تقديري: خط الدخول مالوش عدّ بشري يتقاس عليه.</p>")
     conf = first["overall"]["confusion"]
     labels = sorted({k for k in conf} | {e for row in conf.values() for e in row})
     conf_html = ""
@@ -312,6 +331,7 @@ tracker {esc(report['tracker'])} · model sha {esc(report['model_sha'][:12] or '
 <p><b>معدل الربط</b>: نسبة الأرغفة المعدودة التي جُمعت لها {report['counting']['k_crops']} صور صالحة للتصنيف.</p></div>
 <table><tr><th>صورة/ث</th><th>الحالة</th><th>مقاطع</th><th>المسطرة</th><th>أحداث النظام</th><th>فائت</th><th>زائد</th>
 <th>دقة النوع</th><th>معدل الربط</th><th>الحكم</th></tr>{''.join(rows)}</table>
+{entry_html}
 {conf_html}
 <h2>أمثلة حقيقية من الأخطاء</h2><p class=muted>الدائرة الحمراء: فائت. البنفسجية: زائد. الخط البرتقالي: خط العدّ.</p>
 {''.join(thumbs) or '<p>لا توجد أخطاء لعرضها.</p>'}

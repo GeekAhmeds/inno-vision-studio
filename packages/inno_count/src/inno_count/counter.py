@@ -23,7 +23,7 @@ import numpy as np
 
 from . import __version__
 from .geometry import Area, Line, PlaneCalibration, iou_matrix, is_truncated
-from .types import ClassificationEvent, CountEvent, Detection, HealthEvent
+from .types import ClassificationEvent, CountEvent, Detection, EntryEvent, HealthEvent
 
 DIRECTIONS = ("positive", "negative", "both")
 
@@ -52,10 +52,13 @@ class CounterConfig:
     class_names: list[str] | None = None   # for the multi-class detector baseline vote
     source_id: str = "src"
     model_sha: str = ""
+    role: str = "count"   # "count": the counting line; "entry": a second line that only reports entries
 
     def __post_init__(self) -> None:
         if self.direction not in DIRECTIONS:
             raise ValueError(f"direction must be one of {DIRECTIONS}")
+        if self.role not in ("count", "entry"):
+            raise ValueError("role must be 'count' or 'entry'")
         if self.area is None and self.roi is not None:
             self.area = Area.from_rect(self.roi)
         if self.k_crops < 1 or self.classify_timeout_s <= 0:
@@ -176,6 +179,8 @@ class LineCounter:
                 events.append(ev)
 
         events += self._due_classifications(ts)
+        if self.cfg.role == "entry":
+            events = [EntryEvent(e.uid, e.ts, e.track_id, e.x, e.y) for e in events if isinstance(e, CountEvent)]
         for tid in [t for t, st in self.tracks.items()
                     if ts - st.last_ts > self.cfg.track_forget_s and (st.uid is None or st.classified)]:
             del self.tracks[tid]
@@ -183,6 +188,8 @@ class LineCounter:
 
     def finish(self, ts: float) -> list[Any]:
         """End of stream: classify everything still pending and close the health minute."""
+        if self.cfg.role == "entry":
+            return []
         events = self._due_classifications(ts, force=True)
         if self._minute is not None:
             events.append(HealthEvent(self._minute * 60.0, self._frames,
@@ -217,7 +224,8 @@ class LineCounter:
         (t0, d0, x0, y0), (t1, d1, x1, y1) = crossed
         f = (0 - d0) / (d1 - d0) if d1 != d0 else 1.0
         st.crossing_ts = round(t0 + f * (t1 - t0), 4)
-        st.uid = f"{self.cfg.source_id}:{track_id}:{int(round(st.crossing_ts * 1000))}"
+        prefix = self.cfg.source_id if self.cfg.role == "count" else f"{self.cfg.source_id}:entry"
+        st.uid = f"{prefix}:{track_id}:{int(round(st.crossing_ts * 1000))}"
         self.counted += 1
         return CountEvent(st.uid, st.crossing_ts, track_id, self.cfg.model_sha, __version__,
                           x=round(x0 + f * (x1 - x0), 1), y=round(y0 + f * (y1 - y0), 1))
@@ -265,6 +273,9 @@ class LineCounter:
         out = []
         for st in self.tracks.values():
             if st.uid is None or st.classified:
+                continue
+            if self.cfg.role == "entry":
+                st.classified = True     # nothing to classify; lets the track be forgotten
                 continue
             if not force and ts < st.crossing_ts + self.cfg.classify_timeout_s:
                 continue

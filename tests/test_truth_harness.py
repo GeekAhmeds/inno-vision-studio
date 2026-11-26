@@ -184,6 +184,7 @@ def test_truth_flow_over_http(sim_project):
     saved = client.put(f"/api/projects/{slug}/counting", json={"area": [[0, 0], [640, 0], [600, 360], [40, 360]]}).json()
     assert saved["area"][2] == [600.0, 360.0]
     client.put(f"/api/projects/{slug}/counting", json={"area": None})
+    assert client.put(f"/api/projects/{slug}/counting", json={"entry_line": [3, 3, 3, 3]}).status_code == 400
 
     frame = client.get(f"/api/projects/{slug}/media/{sim_project['media']['id']}/frame?t=5&width=320&mark_x=10&mark_y=10")
     assert frame.status_code == 200 and frame.headers["content-type"] == "image/jpeg"
@@ -218,3 +219,17 @@ def test_truth_flow_over_http(sim_project):
     assert bad.status_code == 400 and "not found" in bad.json()["detail"]
     assert client.get(f"/api/projects/{slug}/reports").json() == []
     assert client.get(f"/api/projects/{slug}/reports/..%2Fetc/report.html").status_code == 404
+
+
+def test_harness_reports_the_entry_line(sim_project):
+    slug, sim = sim_project["slug"], sim_project["clip"]
+    _final_clip(sim_project)
+    y = sim.line_y - 100
+    saved = projects.set_counting(slug, {"entry_line": [0, y, sim.width, y]})     # clicked the other way round
+    assert saved["entry_line"] == [float(sim.width), y, 0.0, y]                   # turned to match the line
+    report = run_harness(slug, detector=SimDetector(sim), fps_list=[10])
+    ov = report["runs"][0]["overall"]
+    assert ov["entries"] is not None and ov["taken_between"] == ov["entries"] - ov["events"]
+    assert abs(ov["taken_between"]) <= 3        # nothing is removed in the simulation
+    html = (projects.project_dir(slug) / report["report_dir"] / "report.html").read_text(encoding="utf-8")
+    assert "خط الدخول" in html

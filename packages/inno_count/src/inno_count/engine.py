@@ -30,10 +30,13 @@ class Tracker(Protocol):
 class Engine:
     def __init__(self, detector: Detector, tracker: Tracker, counter: LineCounter, target_fps: float | None = None,
                  camera_check: CameraCheck | None = None, simulated_latency_s: float = 0.0,
-                 frame_size: tuple[int, int] | None = None):
+                 frame_size: tuple[int, int] | None = None, entry_counter: LineCounter | None = None):
         if target_fps is not None and target_fps <= 0:
             raise ValueError("target_fps must be positive.")
         self.detector, self.tracker, self.counter = detector, tracker, counter
+        if entry_counter is not None and entry_counter.cfg.role != "entry":
+            raise ValueError("entry_counter needs a CounterConfig with role='entry'.")
+        self.entry_counter = entry_counter   # same tracks, a second line: what entered
         self.period = 1.0 / target_fps if target_fps else 0.0
         self.camera_check = camera_check
         self.latency = simulated_latency_s
@@ -65,7 +68,10 @@ class Engine:
         assignments = self.tracker.update(ts, detections)
         if self.camera_check is not None and frame is not None:
             self.counter.camera_moved = self.camera_check.check(ts, frame)
-        return self.counter.update(ts, assignments, detections, frame, self.frame_size)
+        events = []
+        if self.entry_counter is not None:
+            events += self.entry_counter.update(ts, assignments, detections, None, self.frame_size)
+        return events + self.counter.update(ts, assignments, detections, frame, self.frame_size)
 
     def finish(self) -> list[Any]:
         return self.counter.finish(self.last_ts or 0.0)

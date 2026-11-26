@@ -90,6 +90,15 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
 - This replaces the "pixel mask + retrain" idea for now: masking pixels needs the same mask at
   training and inference, so it waits for the first P4 training run.
 
+## Entry line (2026-11-26)
+
+- Optional `counting.entry_line` (e.g. the oven mouth). `CounterConfig(role="entry")` makes a
+  `LineCounter` that only emits `EntryEvent` (no classification, no health). `Engine(entry_counter=...)`
+  feeds it the same tracks as the counting line.
+- Harness: per clip and per condition `entries` and `taken_between = entries - counts`, plus a
+  paragraph in the HTML report. It is an estimate: the entry line has no human truth.
+- The store turns the entry line to the counting line's "after" side, whichever way it was clicked.
+
 ## Known gaps
 
 - **No real camera, no real model, no real footage has been through the studio yet.**

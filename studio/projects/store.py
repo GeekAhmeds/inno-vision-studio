@@ -324,6 +324,7 @@ COUNTING_DEFAULTS: dict[str, Any] = {
     "hysteresis_px": 6.0,
     "roi": None,                # [x1, y1, x2, y2] or None for the whole frame (older projects)
     "area": None,               # [[x, y], ...] polygon around the belt; wins over roi
+    "entry_line": None,         # optional second line (e.g. the oven mouth): entries - counts = taken between
     "edge_margin_px": 3.0,
     "k_crops": 5,
     "classify_timeout_s": 2.0,
@@ -348,6 +349,19 @@ def set_counting(slug: str, changes: dict[str, Any]) -> dict[str, Any]:
         if len(line) != 4 or (line[0], line[1]) == (line[2], line[3]):
             raise ProjectError("The counting line needs two different points.")
         cfg["line"] = [round(float(v), 1) for v in line]
+    entry = cfg["entry_line"]
+    if entry is not None:
+        if len(entry) != 4 or (entry[0], entry[1]) == (entry[2], entry[3]):
+            raise ProjectError("The entry line needs two different points.")
+        entry = [round(float(v), 1) for v in entry]
+        if cfg["line"] is not None:
+            # Same "after" side as the counting line, however the two points were clicked: the
+            # normals (dy, -dx) of both lines must point the same way.
+            lx, ly = cfg["line"][2] - cfg["line"][0], cfg["line"][3] - cfg["line"][1]
+            ex, ey = entry[2] - entry[0], entry[3] - entry[1]
+            if ly * ey + lx * ex < 0:
+                entry = [entry[2], entry[3], entry[0], entry[1]]
+        cfg["entry_line"] = entry
     if cfg["direction"] not in ("positive", "negative", "both"):
         raise ProjectError("Direction must be positive, negative or both.")
     if cfg["roi"] is not None and len(cfg["roi"]) != 4:
@@ -376,5 +390,5 @@ def set_counting(slug: str, changes: dict[str, Any]) -> dict[str, Any]:
                  "Counting setup updated (line and direction).",
                  why_ar="خط العدّ هو المكان الذي يُحسب عنده الرغيف مرة واحدة عند عبوره.",
                  why_en="The counting line is where each object is counted once, as it crosses.",
-                 outputs={k: cfg[k] for k in ("line", "direction", "angle_id", "roi", "area")})
+                 outputs={k: cfg[k] for k in ("line", "entry_line", "direction", "angle_id", "roi", "area")})
     return cfg

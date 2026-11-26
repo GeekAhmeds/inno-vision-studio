@@ -20,6 +20,6 @@ Rule: no AGPL dependency may enter this package (prompt rule 9, decision D6).
 
 __version__ = "0.1.0"
 
-from .types import ClassificationEvent, CountEvent, Detection, HealthEvent  # noqa: E402
+from .types import ClassificationEvent, CountEvent, Detection, EntryEvent, HealthEvent  # noqa: E402
 
-__all__ = ["ClassificationEvent", "CountEvent", "Detection", "HealthEvent", "__version__"]
+__all__ = ["ClassificationEvent", "CountEvent", "Detection", "EntryEvent", "HealthEvent", "__version__"]

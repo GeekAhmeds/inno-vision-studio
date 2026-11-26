@@ -51,6 +51,25 @@ class CountEvent:
 
 
 @dataclass
+class EntryEvent:
+    """An object crossed the entry line (e.g. the oven mouth). Not a count.
+
+    With an entry line and the counting (exit) line on the same tracker, entries minus counts over a
+    period is what was taken off the belt between the two lines (by hand, or dropped).
+    """
+
+    uid: str
+    ts: float
+    track_id: int
+    x: float | None = None
+    y: float | None = None
+    kind: str = "entry"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class ClassificationEvent:
     """Follows the count with the same uid. A verdict never rewrites a count."""
 

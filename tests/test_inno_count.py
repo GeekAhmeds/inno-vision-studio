@@ -14,7 +14,7 @@ from inno_count.engine import Engine, run
 from inno_count.geometry import Area, Line, PlaneCalibration, letterbox, unletterbox
 from inno_count.legacy import GreedyCentroidTracker
 from inno_count.sim import SimDetector, make_belt
-from inno_count.types import ClassificationEvent, CountEvent, Detection, HealthEvent
+from inno_count.types import ClassificationEvent, CountEvent, Detection, EntryEvent, HealthEvent
 
 from studio.harness.match import match
 
@@ -362,3 +362,37 @@ def test_counting_polygon_ignores_what_is_outside_it():
 def test_rect_roi_becomes_an_area():
     cfg = CounterConfig(Line(0, 10, 100, 10), roi=(0, 0, 50, 50))
     assert cfg.area is not None and cfg.area.contains(25, 25) and not cfg.area.contains(75, 25)
+
+
+class _HandPicks:
+    """Wraps a detector: loaves on the left third vanish between the entry and the counting line."""
+
+    def __init__(self, inner, x_max, y_from):
+        self.inner, self.x_max, self.y_from = inner, x_max, y_from
+
+    def detect(self, frame, ts=None):
+        return [d for d in self.inner.detect(frame, ts) if not (d.center[0] < self.x_max and d.center[1] > self.y_from)]
+
+
+def test_entry_line_shows_what_was_taken_between_the_lines():
+    clip = make_belt(seed=5, duration_s=40)
+    entry_y = clip.line_y - 110
+    entry = LineCounter(CounterConfig(Line(clip.width, entry_y, 0, entry_y), role="entry"))
+    detector = _HandPicks(SimDetector(clip), x_max=200, y_from=entry_y + 40)
+    engine = Engine(detector, ByteTrack(), LineCounter(CounterConfig(clip.line)), target_fps=10,
+                    frame_size=(clip.width, clip.height), entry_counter=entry)
+    events = run(engine, ((round(i / clip.fps, 6), None) for i in range(int(clip.duration_s * clip.fps))))
+    got, entered = counts(events), [e for e in events if isinstance(e, EntryEvent)]
+    picked = [x for _, _, x in clip.crossings() if x < 200]
+    assert entered and all(e.uid.split(":")[1] == "entry" for e in entered)
+    assert not any(isinstance(e, ClassificationEvent) and ":entry:" in e.uid for e in events)
+    assert abs((len(entered) - len(got)) - len(picked)) <= 2
+    assert all(e.x >= 200 - 40 for e in got)                     # nothing on the picked side reached the exit
+
+
+def test_entry_role_is_checked():
+    with pytest.raises(ValueError):
+        CounterConfig(Line(0, 0, 10, 0), role="exit")
+    with pytest.raises(ValueError):
+        Engine(None, ByteTrack(), LineCounter(CounterConfig(Line(0, 0, 10, 0))),
+               entry_counter=LineCounter(CounterConfig(Line(0, 0, 10, 0))))

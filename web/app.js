@@ -343,6 +343,7 @@ async function countingTab(slug, p, body, reload) {
   // The counting area is a polygon that follows the belt edges. An older rectangle is shown as one.
   let area = cfg.area || (roi ? [[roi[0], roi[1]], [roi[2], roi[1]], [roi[2], roi[3]], [roi[0], roi[3]]] : null);
   let draft = null;   // points of an area being drawn
+  let entry = cfg.entry_line;   // optional second line at the oven mouth
   if (!data.angles.length) {
     mount(body, explain("أضف فيديو أولًا (تبويب البيانات). أول فيديو لكل زاوية كاميرا يحفظ صورة مرجعية نرسم عليها خط العدّ."));
     return;
@@ -356,6 +357,13 @@ async function countingTab(slug, p, body, reload) {
   const sw = () => Math.max(2, angle.width / 400);
   const redraw = () => {
     drawLine(layer, line, direction.value, angle.width, angle.height);
+    if (entry) {
+      layer.append(svg("line", { x1: entry[0], y1: entry[1], x2: entry[2], y2: entry[3], stroke: "#2563eb",
+        "stroke-width": sw() * 1.5, "stroke-dasharray": "18 10" }));
+      const lbl = svg("text", { x: (entry[0] + entry[2]) / 2, y: (entry[1] + entry[3]) / 2 - angle.width / 120,
+        fill: "#2563eb", "font-size": angle.width / 45, "text-anchor": "middle", "font-weight": "bold" });
+      lbl.textContent = "دخول"; layer.append(lbl);
+    }
     if (area) layer.prepend(svg("polygon", { points: area.map((p) => p.join(",")).join(" "),
       fill: "rgba(15,118,110,0.12)", stroke: "#0f766e", "stroke-width": sw(), "stroke-dasharray": "12 8" }));
     if (draft) {
@@ -369,6 +377,7 @@ async function countingTab(slug, p, body, reload) {
     mode = m; pending = null;
     modeBtn.textContent = mode === "area" ? "اضغط على حواف السير نقطة نقطة…" : "ارسم منطقة العدّ";
     finishBtn.hidden = mode !== "area";
+    entryBtn.textContent = mode === "entry" ? "اضغط نقطتين عند فم الفرن…" : "ارسم خط الدخول";
   };
   const finishArea = () => {
     if (!draft || draft.length < 3) return toast("المنطقة محتاجة 3 نقط على الأقل", true);
@@ -379,6 +388,7 @@ async function countingTab(slug, p, body, reload) {
     draft = []; area = null; setMode("area"); redraw();
   } }, "ارسم منطقة العدّ");
   const finishBtn = h("button", { hidden: true, onclick: finishArea }, "قفّل المنطقة");
+  const entryBtn = h("button", { onclick: () => setMode(mode === "entry" ? "line" : "entry") }, "ارسم خط الدخول");
   const stage = h("div", { style: "position:relative;cursor:crosshair;user-select:none" }, img, layer);
   stage.addEventListener("click", (ev) => {
     const r = img.getBoundingClientRect();
@@ -389,15 +399,18 @@ async function countingTab(slug, p, body, reload) {
       draft.push([x, y]); redraw(); return;
     }
     if (!pending) {
-      pending = [x, y]; line = null;
-      redraw(); layer.append(svg("circle", { cx: x, cy: y, r: angle.width / 150, fill: "#f59e0b" }));
-    } else { line = [...pending, x, y]; pending = null; redraw(); }
+      pending = [x, y];
+      if (mode === "entry") entry = null; else line = null;
+      redraw(); layer.append(svg("circle", { cx: x, cy: y, r: angle.width / 150, fill: mode === "entry" ? "#2563eb" : "#f59e0b" }));
+    } else if (mode === "entry") { entry = [...pending, x, y]; setMode("line"); redraw(); }
+    else { line = [...pending, x, y]; pending = null; redraw(); }
   });
   img.onload = redraw;
   mount(body,
     explain("اضغط نقطتين على الصورة لرسم خط العدّ عبر السير. كل رغيف يُعدّ مرة واحدة عند عبوره الخط في اتجاه السهم.",
       "«منطقة العدّ» (اختيارية): اضغط نقط على حواف السير لحد ما تلف حواليه، وبعدين اضغط على أول نقطة أو «قفّل المنطقة». سيب اللوح المعدني والأرض برّه.",
       "أي حاجة مركزها برّه المنطقة بتتجاهل (الإيد، الرصّة، اللوح)، والرغيف اللي بيلمس حافتها بيتعتبر مقطوع ومش بيتاخد منه مقاس ولا صورة للتصنيف. ده مش محتاج إعادة تدريب.",
+      "«خط الدخول» (اختياري): خط تاني عند فم الفرن، لازم يبقى جوه منطقة العدّ. البرنامج بيعدّ اللي دخل منه، والفرق بينه وبين خط العدّ هو اللي اتشال بالإيد بين الخطين. بيظهر في تقرير القياس.",
       "ضع الخط في منطقة يكون فيها الرغيف كاملًا ومنفصلًا عن غيره، مع مسافة كافية قبله لجمع صور الرغيف للتصنيف.",
       "إذا كان السهم عكس حركة السير اضغط «اعكس الاتجاه»."),
     h("div", { class: "card" },
@@ -409,11 +422,12 @@ async function countingTab(slug, p, body, reload) {
         } }, data.angles.map((a) => h("option", { value: a.angle_id, selected: a.angle_id === angle.angle_id }, `${a.angle_id} (${a.width}×${a.height})`)))),
         field("العدّ", direction), field("هامش بعد الخط (بكسل)", hyst),
         h("button", { onclick: () => { if (line) { line = [line[2], line[3], line[0], line[1]]; redraw(); } } }, "اعكس الاتجاه"),
-        modeBtn, finishBtn,
+        modeBtn, finishBtn, entryBtn,
+        h("button", { onclick: () => { entry = null; redraw(); } }, "امسح خط الدخول"),
         h("button", { onclick: () => { area = null; draft = null; setMode("line"); redraw(); } }, "امسح المنطقة"),
         h("button", { class: "primary", onclick: act(async () => {
           if (!line) return toast("ارسم الخط أولًا بنقطتين", true);
-          await api(`/projects/${slug}/counting`, { method: "PUT", json: { line, area, roi: null, direction: direction.value, angle_id: angle.angle_id, hysteresis_px: Number(hyst.value) } });
+          await api(`/projects/${slug}/counting`, { method: "PUT", json: { line, entry_line: entry, area, roi: null, direction: direction.value, angle_id: angle.angle_id, hysteresis_px: Number(hyst.value) } });
           toast("حُفظ خط العدّ");
         }) }, "حفظ")),
       h("div", { style: "margin-top:12px" }, stage)));

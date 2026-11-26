@@ -113,6 +113,23 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
   dependencies whose licence was not checked yet: `torch-hungarian`, `faster-coco-eval`.
 - Not yet: the P5 gate (new model vs old on truth, rollback), training resume, a dataset diff view.
 
+## P5 — gate, publish, shadow, activate, rollback (2026-11-26)
+
+- `studio/gate.py`: candidate vs current on the same final truth clips, same core, tracker and the
+  bakery's fps. Per condition with ≥ `min_crossings` (default 300): misses compared **paired**
+  (McNemar on crossings missed by one model only), extras by count difference; "worse" = difference
+  ≥ 1 and > z·√(sum). Fails on any worse condition or type accuracy below the owner's threshold;
+  "insufficient" when no condition has enough truth. HTML + JSON report, sha256 recorded.
+  Acceptance 5 is a test (better total, worse night misses → refused; inside the margin → not refused).
+- `studio/publish.py`: publish (inactive) only from a passing report, only if the model file and the
+  current model are unchanged since the gate; folder `published/<sha12>/` with the ONNX, a full
+  sidecar (§6 module 12 fields + counting setup) and the gate report. Shadow days (current / new /
+  physical counts), activation (needs a shadow day or a written reason), one-step rollback, history.
+  `adopt-current` records a model deployed before the studio (r2) as the baseline.
+- **Not wired: upload to the ERP** (`/en/vision/api/v1/counter-app/model/upload/`). The multipart
+  field names and the activate call must be read from `HARDWARE-AGENT/training/productline.py
+  cmd_publish`. Until then the published folder is copied to the agent.
+
 ## Known gaps
 
 - **No real camera, no real model, no real footage has been through the studio yet.**

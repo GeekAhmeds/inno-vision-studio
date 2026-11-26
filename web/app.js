@@ -93,7 +93,7 @@ async function home() {
 
 // ---------------------------------------------------------------- project
 
-const TABS = { sources: "المصادر", data: "البيانات", classes: "الأنواع", counting: "خط العدّ", truth: "المسطرة", label: "التسمية", training: "التدريب", harness: "القياس", log: "ماذا حدث؟" };
+const TABS = { sources: "المصادر", data: "البيانات", classes: "الأنواع", counting: "خط العدّ", truth: "المسطرة", label: "التسمية", training: "التدريب", harness: "القياس", release: "النشر", log: "ماذا حدث؟" };
 
 async function project(slug, tab = "sources") {
   const p = await api("/projects/" + slug);
@@ -128,7 +128,7 @@ async function project(slug, tab = "sources") {
       }) }, "حذف")),
     body);
   const reload = () => project(slug, tab);
-  const tabs = { sources: sourcesTab, data: dataTab, classes: classesTab, counting: countingTab, truth: truthTab, label: labelTab, training: trainingTab, harness: harnessTab, log: logTab };
+  const tabs = { sources: sourcesTab, data: dataTab, classes: classesTab, counting: countingTab, truth: truthTab, label: labelTab, training: trainingTab, harness: harnessTab, release: releaseTab, log: logTab };
   await (tabs[tab] || sourcesTab)(slug, p, body, reload);
 }
 
@@ -766,6 +766,93 @@ async function trainingTab(slug, p, body, reload) {
           jobs.refresh();
         }) }, "ابدأ التدريب")) : h("p", { class: "muted" }, "جهّز نسخة بيانات الأول."),
       h("p", { class: "muted" }, "التدريب بيقف لوحده لو التحقق ما اتحسنش 10 دورات. على المعالج من غير كارت شاشة ممكن ياخد ساعات.")),
+    jobs);
+}
+
+// ---------------------------------------------------------------- release (P5)
+
+const VERDICT_AR = { pass: "نجح", fail: "مرفوض", insufficient: "المسطرة مش كفاية" };
+
+async function releaseTab(slug, p, body, reload) {
+  const [data, models] = await Promise.all([api(`/projects/${slug}/release`), api("/models")]);
+  const dep = data.deployment, st = data.settings;
+  const detectors = models.models.filter((m) => m.role === "detector");
+  const jobs = jobsCard(slug, ["gate"], () => reload());
+  const sha = (x) => h("span", { dir: "ltr", class: "muted" }, (x || "").slice(0, 12));
+
+  // current / pending / history
+  const status = [];
+  if (dep.current) {
+    status.push(h("p", {}, "الموديل الشغال: ", h("b", {}, dep.current.name), " ", sha(dep.current.sha256),
+      dep.current.adopted ? " (اتسجّل من قبل الاستوديو)" : "", ` · من ${when(dep.current.activated_at)}`));
+  } else {
+    const pick = h("select", {}, detectors.map((m) => h("option", { value: m.id }, m.name)));
+    status.push(h("p", {}, "مفيش موديل مسجّل على إنه الشغال حاليًا. لو في موديل شغال في المخبز (زي r2)، سجّله في «التسمية» الأول، وبعدها اختاره هنا علشان البوابة تقارن بيه."),
+      detectors.length ? h("div", { class: "row" }, field("الموديل الشغال في المخبز", pick),
+        h("button", { onclick: act(async () => { await api(`/projects/${slug}/adopt-current`, { method: "POST", json: { model_id: pick.value } }); reload(); }) }, "سجّله كحالي")) : null);
+  }
+  if (dep.pending) {
+    const pd = dep.pending;
+    const day = h("input", { type: "date", value: new Date().toISOString().slice(0, 10), style: "max-width:170px" });
+    const curN = h("input", { type: "number", min: 0, style: "max-width:120px" });
+    const candN = h("input", { type: "number", min: 0, style: "max-width:120px" });
+    const physN = h("input", { type: "number", min: 0, style: "max-width:120px", placeholder: "اختياري" });
+    const note = h("input", { placeholder: "ملاحظة" });
+    const skip = h("input", { placeholder: "لو هتفعّل من غير يوم ظلّ، اكتب السبب" });
+    status.push(h("div", { class: "card", style: "border:2px solid #f59e0b" },
+      h("h3", {}, "مستني التفعيل: ", pd.name, " ", sha(pd.sha256)),
+      h("p", { class: "muted" }, `الفولدر: `, h("span", { dir: "ltr" }, pd.folder), " — انسخه للإيجنت وشغّله جنب الحالي يوم إنتاج كامل من غير ما يأثر على المخزون."),
+      pd.shadow.length ? h("table", {}, h("tr", {}, ["اليوم", "الحالي", "الجديد", "الفعلي", "خطأ الحالي", "خطأ الجديد", "ملاحظة"].map((t) => h("th", {}, t))),
+        pd.shadow.map((r) => h("tr", {}, h("td", {}, r.day), h("td", { class: "num" }, r.current_count), h("td", { class: "num" }, r.candidate_count),
+          h("td", { class: "num" }, r.physical_count ?? "—"), h("td", { class: "num" }, r.current_error_pct != null ? `${r.current_error_pct}%` : "—"),
+          h("td", { class: "num" }, r.candidate_error_pct != null ? `${r.candidate_error_pct}%` : "—"), h("td", {}, r.note))))
+        : h("p", {}, "لسه مفيش أيام ظلّ متسجلة."),
+      h("div", { class: "row" }, field("اليوم", day), field("عدّ الحالي", curN), field("عدّ الجديد", candN), field("العدّ الفعلي (شكاير/أقفاص)", physN), field("ملاحظة", note),
+        h("button", { onclick: act(async () => {
+          await api(`/projects/${slug}/shadow`, { method: "POST", json: { day: day.value, current_count: Number(curN.value), candidate_count: Number(candN.value),
+            physical_count: physN.value === "" ? null : Number(physN.value), note: note.value } }); reload();
+        }) }, "سجّل يوم الظلّ")),
+      h("div", { class: "row" }, field("تخطي يوم الظلّ (سبب)", skip),
+        h("button", { class: "primary", onclick: act(async () => { await api(`/projects/${slug}/activate`, { method: "POST", json: { skip_shadow_reason: skip.value } }); toast("اتفعّل"); reload(); }) }, "فعّل الموديل الجديد"),
+        h("button", { onclick: act(async () => { await api(`/projects/${slug}/publish/drop`, { method: "POST" }); reload(); }) }, "إلغاء النشر"))));
+  }
+  if (dep.history.length) {
+    const prev = dep.history[dep.history.length - 1];
+    const reason = h("input", { placeholder: "السبب (اختياري)" });
+    status.push(h("div", { class: "row" }, h("p", {}, "الموديل السابق: ", h("b", {}, prev.name), " ", sha(prev.sha256)), field("السبب", reason),
+      h("button", { onclick: act(async () => { await api(`/projects/${slug}/rollback`, { method: "POST", json: { reason: reason.value } }); toast("رجعنا للسابق"); reload(); }) }, "ارجع للموديل السابق")));
+  }
+
+  // gate settings + run
+  const fps = h("input", { type: "number", value: st.fps, min: 0.5, step: 0.5, style: "max-width:90px" });
+  const minC = h("input", { type: "number", value: st.min_crossings, min: 1, style: "max-width:100px" });
+  const z = h("input", { type: "number", value: st.z, min: 0.5, max: 5, step: 0.01, style: "max-width:90px" });
+  const typeTh = h("input", { type: "number", value: st.min_type_accuracy == null ? "" : Math.round(st.min_type_accuracy * 100), min: 1, max: 100, style: "max-width:90px", placeholder: "—" });
+  const shippable = detectors.filter((m) => m.may_ship && (!dep.current || m.sha256 !== dep.current.sha256));
+  const cand = h("select", {}, shippable.map((m) => h("option", { value: m.id }, `${m.name} (${m.licence})`)));
+
+  mount(body,
+    explain("الموديل الجديد ما ينزلش المخبز إلا بالترتيب ده: ١) يعدّي البوابة، ٢) يتنشر غير مفعّل، ٣) يشتغل «ظلّ» جنب الحالي يوم إنتاج كامل، ٤) إنسان يفعّله. الموديل القديم بيفضل محفوظ والرجوع له زرار واحد.",
+      "البوابة بتشغّل الموديلين على نفس مقاطع المسطرة بنفس كود العدّ وبسرعة جهاز المخبز. المرشّح يترفض لو كان أسوأ في أي حالة (ليل، زحمة، …) في الفائت أو في الزائد بفرق أكبر من الضوضاء، حتى لو الإجمالي أحسن.",
+      "أي حالة فيها أقل من الحد الأدنى من العبورات ما بتدخلش الحكم. الموديلات برخصة AGPL / GPL ما تقدرش تتنشر."),
+    h("div", { class: "card" }, h("h2", {}, "الموديل في المخبز"), status),
+    h("div", { class: "card" }, h("h2", {}, "البوابة"),
+      h("div", { class: "row" }, field("سرعة جهاز المخبز (صورة/ث)", fps), field("أقل عبور لكل حالة", minC), field("z (هامش الضوضاء)", z), field("أقل دقة نوع %", typeTh),
+        h("button", { onclick: act(async () => {
+          await api(`/projects/${slug}/gate-settings`, { method: "PUT", json: { fps: Number(fps.value), min_crossings: Number(minC.value), z: Number(z.value),
+            min_type_accuracy: typeTh.value === "" ? null : Number(typeTh.value) / 100 } }); toast("اتحفظت إعدادات البوابة");
+        }) }, "احفظ")),
+      shippable.length ? h("div", { class: "row" }, field("المرشّح", cand),
+        h("button", { class: "primary", onclick: act(async () => { await api(`/projects/${slug}/gate`, { method: "POST", json: { candidate_id: cand.value } }); jobs.refresh(); }) }, "شغّل البوابة"))
+        : h("p", { class: "muted" }, "مفيش موديل مسموح بنشره غير الحالي. درّب موديل في «التدريب»."),
+      data.reports.length ? h("table", {}, h("tr", {}, ["الوقت", "المرشّح", "مقابل", "الحكم", "", ""].map((t) => h("th", {}, t))),
+        data.reports.map((r) => h("tr", {}, h("td", {}, when(r.created_at)), h("td", {}, r.candidate.name), h("td", {}, r.current ? r.current.name : "—"),
+          h("td", {}, h("b", { style: `color:${r.verdict === "pass" ? "#0f766e" : r.verdict === "fail" ? "#b91c1c" : "#b45309"}` }, VERDICT_AR[r.verdict]), r.clearly_better ? " · أحسن بوضوح" : ""),
+          h("td", {}, h("a", { href: `/api/projects/${slug}/gate-reports/${r.name}/report.html`, target: "_blank" }, "التقرير")),
+          h("td", {}, r.verdict === "pass" && !dep.pending ? h("button", { onclick: act(async () => {
+            await api(`/projects/${slug}/publish`, { method: "POST", json: { gate_report: r.name } }); toast("اتنشر غير مفعّل"); reload();
+          }) }, "انشر (غير مفعّل)") : null))))
+        : h("p", { class: "muted" }, "لسه مفيش تقارير بوابة.")),
     jobs);
 }
 

@@ -16,7 +16,7 @@ from starlette.background import BackgroundTask
 import cv2
 from inno_count.engine import frame_at
 
-from .. import __version__, datasets, ingest, jobs, prelabel, projects, registry, review, sample, sources, train, truth
+from .. import __version__, datasets, gate, ingest, jobs, prelabel, projects, publish, registry, review, sample, sources, train, truth
 from ..harness import run as harness_run
 from ..truth import proxy
 from ..config import current_user, workspace_dir
@@ -26,7 +26,7 @@ from ..sources.secrets import SecretError
 
 USER_ERRORS = (projects.ProjectError, sources.SourceError, ingest.IngestError, SecretError, truth.TruthError,
                harness_run.HarnessError, registry.RegistryError, sample.SampleError, prelabel.PrelabelError,
-               review.ReviewError, datasets.DatasetError, train.TrainError)
+               review.ReviewError, datasets.DatasetError, train.TrainError, gate.GateError, publish.PublishError)
 jobs.USER_ERRORS = USER_ERRORS
 
 
@@ -491,6 +491,61 @@ def create_app() -> FastAPI:
             raise train.TrainError("Training is not installed on this computer. Run: " + train.available()["how"])
         return jobs.manager.submit(slug, "train", f"تدريب RF-DETR {size} على {snap}", lambda ctx: train.run_training(
             slug, snap, progress=ctx.progress, cancelled=ctx.cancelled, **args)).to_dict()
+
+    # ------------------------------------------------------------ gate, publish, shadow, rollback (P5)
+
+    @app.get("/api/projects/{slug}/release")
+    def release_get(slug: str) -> dict[str, Any]:
+        projects.project_dir(slug)
+        return {"settings": gate.get_settings(slug), "reports": gate.list_reports(slug),
+                "deployment": publish.get_deployment(slug)}
+
+    @app.put("/api/projects/{slug}/gate-settings")
+    def gate_settings_put(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        return gate.set_settings(slug, body)
+
+    @app.post("/api/projects/{slug}/gate")
+    def gate_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        projects.project_dir(slug)
+        cand = registry.require_shippable(str(body.get("candidate_id") or ""))
+        current = body.get("current_id") or None
+        if current:
+            registry.get_model(current)
+        return jobs.manager.submit(slug, "gate", f"البوابة: «{cand['name']}»", lambda ctx: {
+            k: v for k, v in gate.run_gate(slug, cand["id"], current, progress=ctx.progress).items() if k != "per_clip"}).to_dict()
+
+    @app.get("/api/projects/{slug}/gate-reports/{name}/report.html")
+    def gate_report_html(slug: str, name: str) -> FileResponse:
+        gate.load_report(slug, name)
+        return FileResponse(projects.project_dir(slug) / "reports" / name / "report.html", media_type="text/html")
+
+    @app.post("/api/projects/{slug}/publish")
+    def publish_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        return publish.publish(slug, str(body.get("gate_report") or ""))
+
+    @app.post("/api/projects/{slug}/publish/drop")
+    def publish_drop(slug: str) -> dict[str, Any]:
+        publish.drop_pending(slug)
+        return publish.get_deployment(slug)
+
+    @app.post("/api/projects/{slug}/shadow")
+    def shadow_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        phys = body.get("physical_count")
+        return publish.add_shadow(slug, str(body.get("day") or ""), int(body.get("current_count") or 0),
+                                  int(body.get("candidate_count") or 0), None if phys in (None, "") else int(phys),
+                                  str(body.get("note") or ""))
+
+    @app.post("/api/projects/{slug}/activate")
+    def activate_post(slug: str, body: dict = Body(default={})) -> dict[str, Any]:
+        return publish.activate(slug, str(body.get("skip_shadow_reason") or ""))
+
+    @app.post("/api/projects/{slug}/rollback")
+    def rollback_post(slug: str, body: dict = Body(default={})) -> dict[str, Any]:
+        return publish.rollback(slug, str(body.get("reason") or ""))
+
+    @app.post("/api/projects/{slug}/adopt-current")
+    def adopt_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        return publish.adopt_current(slug, str(body.get("model_id") or ""), str(body.get("note") or ""))
 
     @app.get("/api/projects/{slug}/review")
     def review_overview(slug: str) -> dict[str, Any]:

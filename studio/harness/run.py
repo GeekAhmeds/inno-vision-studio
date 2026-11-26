@@ -141,6 +141,7 @@ def run_clip(slug: str, clip_id: int, detector: Any, tracker: str = "bytetrack",
         "events": [e.to_dict() for e in counts],
         "classifications": [e.to_dict() for e in types.values()],
         "misses": [taps[i] for i in m.misses],
+        "miss_ids": sorted(int(i) for i in m.misses),   # indices into the clip's final taps: lets the gate pair two models
         "extras": [counts[i].to_dict() for i in m.extras],
         "used_position": bool(xy),
         # With an entry line: how many entered, and entered minus counted = taken off between the lines.

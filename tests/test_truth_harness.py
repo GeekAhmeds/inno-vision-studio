@@ -180,6 +180,10 @@ def test_truth_flow_over_http(sim_project):
     cfg = client.get(f"/api/projects/{slug}/counting").json()
     assert cfg["config"]["line"] == [640.0, 216.0, 0.0, 216.0] and cfg["angles"][0]["width"] == 640
     assert client.put(f"/api/projects/{slug}/counting", json={"line": [1, 1, 1, 1]}).status_code == 400
+    assert client.put(f"/api/projects/{slug}/counting", json={"area": [[0, 0], [5, 5]]}).status_code == 400
+    saved = client.put(f"/api/projects/{slug}/counting", json={"area": [[0, 0], [640, 0], [600, 360], [40, 360]]}).json()
+    assert saved["area"][2] == [600.0, 360.0]
+    client.put(f"/api/projects/{slug}/counting", json={"area": None})
 
     frame = client.get(f"/api/projects/{slug}/media/{sim_project['media']['id']}/frame?t=5&width=320&mark_x=10&mark_y=10")
     assert frame.status_code == 200 and frame.headers["content-type"] == "image/jpeg"

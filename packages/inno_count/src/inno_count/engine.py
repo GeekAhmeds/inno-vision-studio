@@ -57,12 +57,11 @@ class Engine:
         self._busy_until = ts + self.latency
         self.frames_processed += 1
         detections = self.detector.detect(frame, ts)
-        roi = self.counter.cfg.roi
-        if roi is not None:
+        area = self.counter.cfg.area
+        if area is not None:
             # Only what is on the belt counts: boxes whose centre is outside the counting area
-            # (hands, stacks, the floor) never reach the tracker.
-            x1, y1, x2, y2 = roi
-            detections = [d for d in detections if x1 <= d.center[0] <= x2 and y1 <= d.center[1] <= y2]
+            # (hands, stacks, the metal plate, the floor) never reach the tracker.
+            detections = [d for d in detections if area.contains(*d.center)]
         assignments = self.tracker.update(ts, detections)
         if self.camera_check is not None and frame is not None:
             self.counter.camera_moved = self.camera_check.check(ts, frame)

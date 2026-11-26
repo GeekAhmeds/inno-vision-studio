@@ -74,6 +74,41 @@ def is_truncated(det: Detection, bounds: tuple[float, float, float, float], marg
             or det.x2 >= bx2 - margin or det.y2 >= by2 - margin)
 
 
+class Area:
+    """A counting area: a polygon around the belt (at least 3 points, frame pixels).
+
+    A rectangle is just a 4-point area, so one code path serves both. Only the box *centre* is
+    tested for "inside", which is why no retraining is needed: the detector still sees the whole
+    frame, and anything centred outside (a hand, the metal plate, a stack) never reaches the tracker.
+    """
+
+    def __init__(self, points: list[tuple[float, float]] | list[list[float]]) -> None:
+        pts = [(float(x), float(y)) for x, y in points]
+        if len(pts) < 3:
+            raise ValueError("A counting area needs at least 3 points.")
+        self.points = pts
+        self._contour = np.array(pts, dtype=np.float32).reshape(-1, 1, 2)
+        if abs(cv2.contourArea(self._contour)) < 1.0:
+            raise ValueError("The counting area has no size (its points are on one line).")
+
+    @classmethod
+    def from_rect(cls, rect: tuple[float, float, float, float]) -> "Area":
+        x1, y1, x2, y2 = rect
+        return cls([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
+
+    def distance(self, x: float, y: float) -> float:
+        """Signed distance to the edge: positive inside, negative outside."""
+        return float(cv2.pointPolygonTest(self._contour, (float(x), float(y)), True))
+
+    def contains(self, x: float, y: float) -> bool:
+        return self.distance(x, y) >= 0.0
+
+    def cuts(self, det: Detection, margin: float) -> bool:
+        """The box reaches the area's edge: a corner is outside, or closer than `margin` to it."""
+        corners = ((det.x1, det.y1), (det.x2, det.y1), (det.x2, det.y2), (det.x1, det.y2))
+        return any(self.distance(x, y) <= margin for x, y in corners)
+
+
 def iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """IoU between every box in a (N×4 xyxy) and b (M×4), vectorised."""
     if len(a) == 0 or len(b) == 0:

@@ -22,7 +22,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from . import __version__
-from .geometry import Line, PlaneCalibration, iou_matrix, is_truncated
+from .geometry import Area, Line, PlaneCalibration, iou_matrix, is_truncated
 from .types import ClassificationEvent, CountEvent, Detection, HealthEvent
 
 DIRECTIONS = ("positive", "negative", "both")
@@ -40,6 +40,7 @@ class CounterConfig:
     direction: str = "positive"
     hysteresis_px: float = 6.0
     roi: tuple[float, float, float, float] | None = None
+    area: Area | None = None               # polygon counting area; wins over roi when both are set
     edge_margin_px: float = 3.0
     k_crops: int = 5
     classify_timeout_s: float = 2.0
@@ -55,6 +56,8 @@ class CounterConfig:
     def __post_init__(self) -> None:
         if self.direction not in DIRECTIONS:
             raise ValueError(f"direction must be one of {DIRECTIONS}")
+        if self.area is None and self.roi is not None:
+            self.area = Area.from_rect(self.roi)
         if self.k_crops < 1 or self.classify_timeout_s <= 0:
             raise ValueError("k_crops >= 1 and classify_timeout_s > 0 are required.")
 
@@ -152,7 +155,11 @@ class LineCounter:
 
         for track_id, di in assignments:
             det = detections[di]
-            truncated = bool(bounds and is_truncated(det, bounds, self.cfg.edge_margin_px))
+            if self.cfg.area is not None:
+                truncated = self.cfg.area.cuts(det, self.cfg.edge_margin_px) or bool(
+                    frame_size and is_truncated(det, (0, 0, frame_size[0], frame_size[1]), self.cfg.edge_margin_px))
+            else:
+                truncated = bool(bounds and is_truncated(det, bounds, self.cfg.edge_margin_px))
             isolated = overlap.shape[0] == 0 or float(overlap[di].max(initial=0.0)) < self.cfg.isolation_iou
             cx, cy = det.center
             d = self.cfg.line.signed_distance(cx, cy)

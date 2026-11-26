@@ -79,6 +79,17 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
 - The review screen has no box resize handles: delete and redraw.
 - Box classes are optional: the Counting Engine's detector is single-class; "object" is accepted.
 
+## Counting area as a polygon (2026-11-26)
+
+- `inno_count.geometry.Area`: a polygon around the belt (≥3 points). The engine drops every box whose
+  centre is outside it before the tracker; a box with a corner outside (or within `edge_margin_px` of
+  the edge) is "truncated": still counted, never used for size or class crops.
+- `CounterConfig(area=...)`; the old `roi` rectangle is turned into a 4-point area, so old projects
+  behave as before. Project setting `counting.area` = `[[x, y], ...]`, validated (≥3 points, non-zero size).
+- Counting tab: click points along the belt edges, click the first point (or "close") to finish.
+- This replaces the "pixel mask + retrain" idea for now: masking pixels needs the same mask at
+  training and inference, so it waits for the first P4 training run.
+
 ## Known gaps
 
 - **No real camera, no real model, no real footage has been through the studio yet.**
@@ -98,6 +109,8 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
 
 - **On the owner's machine:** connect a real camera; draw the line on the bread footage; make the
   first truth clips (two counts each); run the harness on the current r2 model.
-- **Decision D6 (training stack licence)** before P4 training. P1 needed no decision: the tracker is
+- **Decision D6 (training stack licence):** RF-DETR (Apache 2.0, N/S/M/L detection) primary, D-FINE
+  competitor; Ultralytics YOLO only as a reference in bake-offs, never shipped (AGPL covers trained
+  weights per Ultralytics). Owner agreed 2026-11-26. P1 needed no decision: the tracker is
   our own code, and inference uses ONNX Runtime (MIT).
 - **Access to the ERP repository** for `inno_count` v0 and the agent's code path.

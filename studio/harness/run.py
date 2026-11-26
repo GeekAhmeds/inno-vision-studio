@@ -25,6 +25,7 @@ from inno_count.counter import CounterConfig, LineCounter
 from inno_count.detector import ModelLoadError, OnnxDetector
 from inno_count.engine import Engine, frame_at, read_video
 from inno_count.geometry import Line, PlaneCalibration
+from inno_count.geometry import Area
 from inno_count.legacy import GreedyCentroidTracker
 from inno_count.types import ClassificationEvent, CountEvent
 
@@ -72,7 +73,8 @@ def build_engine(slug: str, detector: Any, tracker: str = "bytetrack", fps: floa
     cal = PlaneCalibration.from_dict(counting["calibration"]) if counting["calibration"] else None
     cfg = CounterConfig(
         line=Line(*counting["line"]), direction=counting["direction"], hysteresis_px=counting["hysteresis_px"],
-        roi=tuple(counting["roi"]) if counting["roi"] else None, edge_margin_px=counting["edge_margin_px"],
+        roi=tuple(counting["roi"]) if counting["roi"] else None,
+        area=Area(counting["area"]) if counting.get("area") else None, edge_margin_px=counting["edge_margin_px"],
         k_crops=counting["k_crops"], classify_timeout_s=counting["classify_timeout_s"], calibration=cal,
         class_names=class_names, source_id=slug, model_sha=model_sha)
     return Engine(detector, TRACKERS[tracker](), LineCounter(cfg), target_fps=fps, simulated_latency_s=latency_s)

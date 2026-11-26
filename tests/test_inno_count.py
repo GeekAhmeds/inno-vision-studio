@@ -11,7 +11,7 @@ from inno_count.camera import CameraCheck
 from inno_count.counter import CounterConfig, LineCounter
 from inno_count.detector import ModelLoadError, OnnxDetector, decode
 from inno_count.engine import Engine, run
-from inno_count.geometry import Line, PlaneCalibration, letterbox, unletterbox
+from inno_count.geometry import Area, Line, PlaneCalibration, letterbox, unletterbox
 from inno_count.legacy import GreedyCentroidTracker
 from inno_count.sim import SimDetector, make_belt
 from inno_count.types import ClassificationEvent, CountEvent, Detection, HealthEvent
@@ -333,3 +333,32 @@ def test_counting_area_ignores_what_is_outside_it():
     truth_left = [t for t, _, x in clip.crossings() if x < 320]
     assert got and all(e.x <= 320 for e in got)
     assert abs(len(got) - len(truth_left)) <= 1
+
+
+def test_area_polygon_inside_and_edges():
+    tri = Area([(0, 0), (100, 0), (0, 100)])
+    assert tri.contains(10, 10) and not tri.contains(80, 80)
+    assert tri.cuts(Detection(60, 10, 90, 30, 0.9), margin=2)          # a corner pokes outside
+    assert not tri.cuts(Detection(10, 10, 20, 20, 0.9), margin=2)
+    with pytest.raises(ValueError):
+        Area([(0, 0), (10, 10)])
+    with pytest.raises(ValueError):
+        Area([(0, 0), (10, 10), (20, 20)])                             # all on one line
+
+
+def test_counting_polygon_ignores_what_is_outside_it():
+    """A slanted belt edge: only loaves whose centre is inside the polygon count."""
+    clip = make_belt(seed=3, duration_s=30)
+    poly = Area([(0, 0), (360, 0), (280, clip.height), (0, clip.height)])
+    engine = Engine(SimDetector(clip), ByteTrack(), LineCounter(CounterConfig(clip.line, area=poly)),
+                    target_fps=10, frame_size=(clip.width, clip.height))
+    events = run(engine, ((round(i / clip.fps, 6), None) for i in range(int(clip.duration_s * clip.fps))))
+    got = counts(events)
+    assert got and all(poly.distance(e.x, e.y) > -5 for e in got)
+    inside = [t for t, _, x in clip.crossings() if poly.contains(x, clip.line_y)]
+    assert abs(len(got) - len(inside)) <= 1
+
+
+def test_rect_roi_becomes_an_area():
+    cfg = CounterConfig(Line(0, 10, 100, 10), roi=(0, 0, 50, 50))
+    assert cfg.area is not None and cfg.area.contains(25, 25) and not cfg.area.contains(75, 25)

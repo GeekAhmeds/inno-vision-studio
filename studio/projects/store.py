@@ -322,7 +322,8 @@ COUNTING_DEFAULTS: dict[str, Any] = {
     "direction": "positive",    # positive | negative | both
     "angle_id": "angle-1",
     "hysteresis_px": 6.0,
-    "roi": None,                # [x1, y1, x2, y2] or None for the whole frame
+    "roi": None,                # [x1, y1, x2, y2] or None for the whole frame (older projects)
+    "area": None,               # [[x, y], ...] polygon around the belt; wins over roi
     "edge_margin_px": 3.0,
     "k_crops": 5,
     "classify_timeout_s": 2.0,
@@ -351,6 +352,13 @@ def set_counting(slug: str, changes: dict[str, Any]) -> dict[str, Any]:
         raise ProjectError("Direction must be positive, negative or both.")
     if cfg["roi"] is not None and len(cfg["roi"]) != 4:
         raise ProjectError("The ROI needs four numbers: x1, y1, x2, y2.")
+    if cfg["area"] is not None:
+        try:
+            from inno_count.geometry import Area
+            cfg["area"] = [[round(float(x), 1), round(float(y), 1)] for x, y in cfg["area"]]
+            Area(cfg["area"])
+        except (TypeError, ValueError) as exc:
+            raise ProjectError("The counting area needs at least 3 points that enclose some space.") from exc
     cal = cfg["calibration"]
     if cal is not None:
         if len(cal.get("image_points", [])) != 4 or float(cal.get("width_cm", 0)) <= 0 or float(cal.get("length_cm", 0)) <= 0:
@@ -368,5 +376,5 @@ def set_counting(slug: str, changes: dict[str, Any]) -> dict[str, Any]:
                  "Counting setup updated (line and direction).",
                  why_ar="خط العدّ هو المكان الذي يُحسب عنده الرغيف مرة واحدة عند عبوره.",
                  why_en="The counting line is where each object is counted once, as it crosses.",
-                 outputs={k: cfg[k] for k in ("line", "direction", "angle_id")})
+                 outputs={k: cfg[k] for k in ("line", "direction", "angle_id", "roi", "area")})
     return cfg

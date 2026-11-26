@@ -100,3 +100,24 @@ def make_constant_onnx(path, output: np.ndarray, imgsz: int) -> None:
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 8
     onnx.save(model, str(path))
+
+
+def make_rfdetr_onnx(path, dets: np.ndarray, logits: np.ndarray, hw: tuple[int, int] = (64, 64)) -> None:
+    """A tiny graph shaped like an RF-DETR export: input `input`, outputs `dets` and `labels` (constants)."""
+    onnx = pytest.importorskip("onnx")
+    from onnx import TensorProto, helper, numpy_helper
+
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, hw[0], hw[1]])
+    outs = [helper.make_tensor_value_info("dets", TensorProto.FLOAT, [1, *dets.shape]),
+            helper.make_tensor_value_info("labels", TensorProto.FLOAT, [1, *logits.shape])]
+    nodes = [helper.make_node("ReduceMean", ["input"], ["m"], keepdims=0),
+             helper.make_node("Mul", ["m", "zero"], ["z"]),
+             helper.make_node("Add", ["cd", "z"], ["dets"]),
+             helper.make_node("Add", ["cl", "z"], ["labels"])]
+    graph = helper.make_graph(nodes, "rfdetr_const", [inp], outs, initializer=[
+        numpy_helper.from_array(dets[None].astype(np.float32), "cd"),
+        numpy_helper.from_array(logits[None].astype(np.float32), "cl"),
+        numpy_helper.from_array(np.zeros((), np.float32), "zero")])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    onnx.save(model, str(path))

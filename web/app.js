@@ -93,7 +93,7 @@ async function home() {
 
 // ---------------------------------------------------------------- project
 
-const TABS = { sources: "المصادر", data: "البيانات", classes: "الأنواع", counting: "خط العدّ", truth: "المسطرة", label: "التسمية", harness: "القياس", log: "ماذا حدث؟" };
+const TABS = { sources: "المصادر", data: "البيانات", classes: "الأنواع", counting: "خط العدّ", truth: "المسطرة", label: "التسمية", training: "التدريب", harness: "القياس", log: "ماذا حدث؟" };
 
 async function project(slug, tab = "sources") {
   const p = await api("/projects/" + slug);
@@ -128,7 +128,7 @@ async function project(slug, tab = "sources") {
       }) }, "حذف")),
     body);
   const reload = () => project(slug, tab);
-  const tabs = { sources: sourcesTab, data: dataTab, classes: classesTab, counting: countingTab, truth: truthTab, label: labelTab, harness: harnessTab, log: logTab };
+  const tabs = { sources: sourcesTab, data: dataTab, classes: classesTab, counting: countingTab, truth: truthTab, label: labelTab, training: trainingTab, harness: harnessTab, log: logTab };
   await (tabs[tab] || sourcesTab)(slug, p, body, reload);
 }
 
@@ -725,6 +725,48 @@ async function harnessTab(slug, p, body, reload) {
         h("td", { class: "num" }, (r.fps || []).join("، ")), h("td", { class: "num" }, r.truth), h("td", { class: "num" }, r.misses), h("td", { class: "num" }, r.extras),
         h("td", {}, h("a", { href: `/api/projects/${slug}/reports/${r.name}/report.html`, target: "_blank" }, "التقرير")))))
       : h("p", { class: "muted" }, "لا توجد تقارير بعد.")));
+}
+
+// ---------------------------------------------------------------- training (P4)
+
+async function trainingTab(slug, p, body, reload) {
+  const data = await api(`/projects/${slug}/training`);
+  const jobs = jobsCard(slug, ["dataset", "train"], () => reload());
+  const blockMin = h("input", { type: "number", value: 10, min: 1, step: 1, style: "max-width:100px" });
+  const snap = h("select", {}, data.snapshots.map((s) => h("option", { value: s.id }, `${s.id} — ${s.counts.train.images} تدريب / ${s.counts.valid.images} تحقق`)));
+  const size = h("select", {}, h("option", { value: "nano" }, "Nano (الأسرع، يكفي للبداية)"), h("option", { value: "small" }, "Small"),
+    h("option", { value: "medium" }, "Medium (أدق وأبطأ)"), h("option", { value: "large" }, "Large"));
+  const epochs = h("input", { type: "number", value: 50, min: 1, max: 1000, style: "max-width:100px" });
+  const batch = h("input", { type: "number", value: 4, min: 1, max: 64, style: "max-width:80px" });
+  const accum = h("input", { type: "number", value: 4, min: 1, max: 64, style: "max-width:80px" });
+  const device = h("select", {}, h("option", { value: "auto" }, "تلقائي"), h("option", { value: "cuda" }, "كارت الشاشة (CUDA)"), h("option", { value: "cpu" }, "المعالج (بطيء)"));
+  const st = data.review;
+  const snapRows = data.snapshots.map((s) => h("tr", {}, h("td", { dir: "ltr" }, s.id),
+    ["train", "valid", "test"].map((k) => h("td", { class: "num" }, `${s.counts[k].images} (${s.counts[k].boxes} صندوق، ${s.counts[k].blocks} كتلة)`)),
+    h("td", { class: "num" }, s.left_out_near_truth)));
+  mount(body,
+    explain("التدريب بيتم بـ RF-DETR (رخصة Apache 2.0)، وعلى الصناديق اللي إنسان أكّدها بس في تبويب «التسمية».",
+      "الخطوة الأولى «نسخة بيانات»: صورة ثابتة من الصور المؤكدة متقسّمة تدريب / تحقق / اختبار بكتل زمنية، علشان اللقطات المتشابهة ما تتوزعش على الجهتين ونضحك على نفسنا. الصور القريبة من مقاطع المسطرة بتتشال.",
+      "بعد التدريب الموديل بيتسجّل لوحده في الموديلات. الحكم عليه في تبويب «القياس» على المسطرة، مش برقم التحقق.",
+      data.train.installed ? "التدريب متسطّب على الجهاز ده." : h("span", {}, "التدريب مش متسطّب على الجهاز ده. شغّل في فولدر البرنامج: ", h("code", { dir: "ltr" }, "uv sync --extra train"))),
+    h("div", { class: "card" }, h("h2", {}, "١. نسخة بيانات"),
+      h("p", { class: "muted" }, `صور مؤكدة: ${st.confirmed ?? "—"}`),
+      h("div", { class: "row" }, field("طول الكتلة الزمنية (دقيقة)", blockMin),
+        h("button", { class: "primary", onclick: act(async () => {
+          await api(`/projects/${slug}/datasets`, { method: "POST", json: { block_s: Number(blockMin.value) * 60 } }); jobs.refresh();
+        }) }, "جهّز نسخة بيانات")),
+      data.snapshots.length ? h("table", {}, h("tr", {}, ["النسخة", "تدريب", "تحقق", "اختبار", "اتشال جنب المسطرة"].map((t) => h("th", {}, t))), snapRows)
+        : h("p", { class: "muted" }, "مفيش نسخ بيانات لسه.")),
+    h("div", { class: "card" }, h("h2", {}, "٢. تدريب"),
+      data.snapshots.length ? h("div", { class: "row" }, field("نسخة البيانات", snap), field("الحجم", size), field("دورات (حد أقصى)", epochs),
+        field("دفعة", batch), field("تجميع", accum), field("الجهاز", device),
+        h("button", { class: "primary", disabled: !data.train.installed, onclick: act(async () => {
+          await api(`/projects/${slug}/train`, { method: "POST", json: { snapshot: snap.value, size: size.value, epochs: Number(epochs.value),
+            batch_size: Number(batch.value), grad_accum: Number(accum.value), device: device.value } });
+          jobs.refresh();
+        }) }, "ابدأ التدريب")) : h("p", { class: "muted" }, "جهّز نسخة بيانات الأول."),
+      h("p", { class: "muted" }, "التدريب بيقف لوحده لو التحقق ما اتحسنش 10 دورات. على المعالج من غير كارت شاشة ممكن ياخد ساعات.")),
+    jobs);
 }
 
 // ---------------------------------------------------------------- labelling

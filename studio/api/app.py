@@ -16,7 +16,7 @@ from starlette.background import BackgroundTask
 import cv2
 from inno_count.engine import frame_at
 
-from .. import __version__, ingest, jobs, prelabel, projects, registry, review, sample, sources, truth
+from .. import __version__, datasets, ingest, jobs, prelabel, projects, registry, review, sample, sources, train, truth
 from ..harness import run as harness_run
 from ..truth import proxy
 from ..config import current_user, workspace_dir
@@ -26,7 +26,7 @@ from ..sources.secrets import SecretError
 
 USER_ERRORS = (projects.ProjectError, sources.SourceError, ingest.IngestError, SecretError, truth.TruthError,
                harness_run.HarnessError, registry.RegistryError, sample.SampleError, prelabel.PrelabelError,
-               review.ReviewError)
+               review.ReviewError, datasets.DatasetError, train.TrainError)
 jobs.USER_ERRORS = USER_ERRORS
 
 
@@ -462,6 +462,35 @@ def create_app() -> FastAPI:
             raise prelabel.PrelabelError("Choose at least one detector to compare.")
         return jobs.manager.submit(slug, "bakeoff", "مقارنة الموديلات المساعدة", lambda ctx: prelabel.run_bakeoff(
             slug, ids, progress=ctx.progress)).to_dict()
+
+    # ------------------------------------------------------------ datasets and training (P4)
+
+    @app.get("/api/projects/{slug}/training")
+    def training_get(slug: str) -> dict[str, Any]:
+        projects.project_dir(slug)
+        return {"snapshots": datasets.list_snapshots(slug), "train": train.available(), "sizes": list(train.SIZES),
+                "review": review.stats(slug)}
+
+    @app.post("/api/projects/{slug}/datasets")
+    def datasets_post(slug: str, body: dict = Body(default={})) -> dict[str, Any]:
+        projects.project_dir(slug)
+        block_s = float(body.get("block_s") or 600)
+        seed = int(body.get("seed") or 0)
+        return jobs.manager.submit(slug, "dataset", "تجهيز نسخة بيانات للتدريب", lambda ctx: datasets.build_snapshot(
+            slug, block_s=block_s, seed=seed, progress=ctx.progress)).to_dict()
+
+    @app.post("/api/projects/{slug}/train")
+    def train_post(slug: str, body: dict = Body(...)) -> dict[str, Any]:
+        projects.project_dir(slug)
+        snap = str(body.get("snapshot") or "")
+        datasets.snapshot_dir(slug, snap)
+        size = str(body.get("size") or "nano")
+        args = dict(size=size, epochs=int(body.get("epochs") or 50), batch_size=int(body.get("batch_size") or 4),
+                    grad_accum=int(body.get("grad_accum") or 4), device=str(body.get("device") or "auto"))
+        if not train.available()["installed"]:
+            raise train.TrainError("Training is not installed on this computer. Run: " + train.available()["how"])
+        return jobs.manager.submit(slug, "train", f"تدريب RF-DETR {size} على {snap}", lambda ctx: train.run_training(
+            slug, snap, progress=ctx.progress, cancelled=ctx.cancelled, **args)).to_dict()
 
     @app.get("/api/projects/{slug}/review")
     def review_overview(slug: str) -> dict[str, Any]:

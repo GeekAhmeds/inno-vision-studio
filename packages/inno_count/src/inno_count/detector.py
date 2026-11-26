@@ -8,6 +8,12 @@ Sidecar JSON next to the model (`model.onnx` -> `model.json`), fields used here:
   imgsz     input size (square)
   conf, iou thresholds
   roi_crop  [x1, y1, x2, y2] crop applied before the detector; pixels, or fractions if all <= 1
+  format    "yolo" (default) or "rfdetr"; an ONNX graph with outputs named `dets` and `labels` is
+            taken as RF-DETR even without it
+
+RF-DETR (Apache 2.0) export: input `input` NCHW, plain resize (no letterbox), ImageNet mean/std;
+outputs `dets` (queries × 4, normalised cx, cy, w, h) and `labels` (queries × nc+1 raw logits, the
+last slot is background). Scores are a per-class sigmoid; DETR needs no NMS.
 """
 
 from __future__ import annotations
@@ -22,6 +28,31 @@ import numpy as np
 
 from .geometry import letterbox, unletterbox
 from .types import Detection
+
+
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+
+
+def decode_rfdetr(dets: np.ndarray, logits: np.ndarray, conf: float, nc: int | None,
+                  width: float, height: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """RF-DETR outputs -> (boxes xyxy in pixels of a width×height image, scores, classes)."""
+    boxes = np.asarray(dets, dtype=np.float32).reshape(-1, 4)
+    lg = np.asarray(logits, dtype=np.float32)
+    lg = lg.reshape(-1, lg.shape[-1])
+    if nc is not None and lg.shape[1] > nc:
+        lg = lg[:, :nc]                       # drop the background slot(s)
+    elif nc is None and lg.shape[1] > 1:
+        lg = lg[:, :-1]
+    probs = 1.0 / (1.0 + np.exp(-lg))
+    classes = probs.argmax(axis=1)
+    scores = probs[np.arange(len(probs)), classes]
+    keep = scores >= conf
+    b, scores, classes = boxes[keep], scores[keep], classes[keep]
+    cx, cy, w, h = b[:, 0] * width, b[:, 1] * height, b[:, 2] * width, b[:, 3] * height
+    xyxy = np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=1) if len(b) else np.zeros((0, 4), np.float32)
+    order = np.argsort(-scores)
+    return xyxy[order], scores[order], classes[order]
 
 
 class ModelLoadError(RuntimeError):
@@ -133,6 +164,16 @@ class OnnxDetector:
         self.names = [names[k] for k in sorted(names, key=int)] if isinstance(names, dict) else list(names)
         self.roi_crop = self.sidecar.get("roi_crop")
         self.provider = self.session.get_providers()[0]
+        out_names = [o.name for o in self.session.get_outputs()]
+        self.format = self.sidecar.get("format") or ("rfdetr" if {"dets", "labels"} <= set(out_names) else "yolo")
+        if self.format not in ("yolo", "rfdetr"):
+            raise ModelLoadError(f"Unknown model format in the sidecar: {self.format}")
+        if self.format == "rfdetr":
+            if not {"dets", "labels"} <= set(out_names):
+                raise ModelLoadError(f"An RF-DETR model needs outputs named dets and labels; this one has {out_names}.")
+            h = inp.shape[2] if isinstance(inp.shape[2], int) else self.imgsz
+            w = inp.shape[3] if isinstance(inp.shape[3], int) else self.imgsz
+            self.input_hw = (int(h), int(w))
 
     def _roi(self, frame: np.ndarray) -> tuple[int, int, int, int]:
         h, w = frame.shape[:2]
@@ -146,6 +187,8 @@ class OnnxDetector:
     def detect(self, frame: np.ndarray, ts: float | None = None) -> list[Detection]:
         x1, y1, x2, y2 = self._roi(frame)
         crop = frame[y1:y2, x1:x2]
+        if self.format == "rfdetr":
+            return self._detect_rfdetr(crop, x1, y1)
         img, info = letterbox(crop, self.imgsz)
         blob = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)[None].astype(np.float32) / 255.0
         output = self.session.run(None, {self.input_name: blob})[0]
@@ -153,4 +196,16 @@ class OnnxDetector:
         boxes = unletterbox(boxes, info)
         boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, crop.shape[1]) + x1
         boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, crop.shape[0]) + y1
+        return [Detection(*map(float, b), float(s), int(c)) for b, s, c in zip(boxes, scores, classes)]
+
+    def _detect_rfdetr(self, crop: np.ndarray, ox: int, oy: int) -> list[Detection]:
+        h, w = self.input_hw
+        img = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
+        blob = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).transpose(2, 0, 1).astype(np.float32) / 255.0
+        blob = ((blob - IMAGENET_MEAN) / IMAGENET_STD)[None]
+        dets, logits = self.session.run(["dets", "labels"], {self.input_name: blob})
+        boxes, scores, classes = decode_rfdetr(dets, logits, self.decode_conf, len(self.names) or None,
+                                               crop.shape[1], crop.shape[0])
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, crop.shape[1]) + ox
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, crop.shape[0]) + oy
         return [Detection(*map(float, b), float(s), int(c)) for b, s, c in zip(boxes, scores, classes)]

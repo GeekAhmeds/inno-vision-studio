@@ -99,6 +99,20 @@ Phases refer to §11 of `VISION_TRAINING_STUDIO_PROMPT.md`.
   paragraph in the HTML report. It is an estimate: the entry line has no human truth.
 - The store turns the entry line to the counting line's "after" side, whichever way it was clicked.
 
+## P4 — dataset snapshots and RF-DETR training (2026-11-26), not yet run on a real GPU
+
+- `studio/datasets.py`: immutable COCO snapshots (`datasets/ds-<stamp>/{train,valid,test}`) from
+  human-confirmed pictures only, split by time block (default 600 s of one video per block), frames
+  within the truth buffer left out; manifest with counts, block→split map and annotation hashes.
+- `studio/train.py` + `studio/train_worker.py`: RF-DETR (N/S/M/L, Apache 2.0) trained in a child
+  process; progress from Lightning's `metrics.csv`; early stopping (patience 10); export to ONNX;
+  sidecar `format: rfdetr`; registered with licence Apache-2.0 and the snapshot id.
+- `inno_count.detector`: reads RF-DETR exports (outputs `dets`/`labels`, plain resize, ImageNet
+  normalisation, sigmoid scores, last logit slot = background).
+- Extra `train` (`uv sync --extra train`): `rfdetr[train,onnx]`, Python < 3.14. Training-only
+  dependencies whose licence was not checked yet: `torch-hungarian`, `faster-coco-eval`.
+- Not yet: the P5 gate (new model vs old on truth, rollback), training resume, a dataset diff view.
+
 ## Known gaps
 
 - **No real camera, no real model, no real footage has been through the studio yet.**

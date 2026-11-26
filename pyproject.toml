@@ -14,6 +14,14 @@ dependencies = [
     "inno-count[onnx]",
 ]
 
+[project.optional-dependencies]
+# Training (P4). Heavy: pulls torch. RF-DETR is Apache 2.0 (decision D6).
+# rfdetr[train] pins the pre-release torch-hungarian==0.1.0rc0; naming it here lets uv accept it.
+train = [
+    "rfdetr[train,onnx]>=1.12; python_version < '3.14'",
+    "torch-hungarian==0.1.0rc0; python_version < '3.14'",
+]
+
 [project.scripts]
 studio = "studio.cli:main"
 

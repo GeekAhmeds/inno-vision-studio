@@ -76,7 +76,7 @@ class _Drop:
 
 def _model(tmp_path, name, licence="Apache-2.0"):
     path = tmp_path / f"{name}.onnx"
-    make_constant_onnx(path, np.zeros((1, 6, 4 + 2), np.float32) + hash(name) % 7, 32)
+    make_constant_onnx(path, np.zeros((1, 6, 4 + 2), np.float32) + sum(map(ord, name)), 32)
     (tmp_path / f"{name}.json").write_text(json.dumps({"names": ["small", "large"]}), encoding="utf-8")
     return registry.add_model(path, name, "detector", licence)
 
